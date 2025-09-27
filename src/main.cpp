@@ -326,9 +326,8 @@ const char* htmlPage = R"rawliteral(
         </div>
         
         <div class="info">
-            <div>Data logs every 2 minutes • Updates every 30 seconds</div>
             <div>ESP32-S3 with BME280 Sensor</div>
-            <div>I2C: SDA=GPIO21, SCL=GPIO20</div>
+            <div>A.J. 70490 | L.P. 72810</div>
         </div>
     </div>
 
