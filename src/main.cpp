@@ -115,12 +115,20 @@ const char* htmlPage = R"rawliteral(
             .reading { padding: 12px; margin: 8px 0; }
             .value { font-size: 20px; }
             .chart-container { height: 250px; }
-            .nav-buttons { margin: 15px 0; }
+            .nav-buttons { 
+                margin: 15px 0;
+                display: flex;
+                justify-content: center;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
             .btn { 
-                padding: 8px 15px; 
-                margin: 2px; 
-                font-size: 13px; 
+                padding: 12px 16px; 
+                margin: 4px; 
+                font-size: 14px; 
                 display: inline-block;
+                min-width: 100px;
+                text-align: center;
             }
         }
         
@@ -129,7 +137,19 @@ const char* htmlPage = R"rawliteral(
             .stats { grid-template-columns: repeat(2, 1fr); gap: 10px; }
             .value { font-size: 18px; }
             .chart-container { height: 200px; }
-            .btn { display: block; margin: 5px auto; width: 80%; }
+            .nav-buttons {
+                flex-direction: column;
+                align-items: center;
+                gap: 10px;
+            }
+            .btn { 
+                display: block; 
+                margin: 5px auto; 
+                width: 80%;
+                max-width: 200px;
+                padding: 14px 20px;
+                font-size: 15px;
+            }
         }
         .reading { 
             background-color: #f9f9f9; 
@@ -237,12 +257,6 @@ const char* htmlPage = R"rawliteral(
                     <div class="label">Pressure</div>
                     <span class="value" id="pressure">PRESSURE_VALUE</span>
                     <span class="unit">hPa</span>
-                </div>
-                
-                <div class="reading altitude">
-                    <div class="label">Altitude</div>
-                    <span class="value" id="altitude">ALTITUDE_VALUE</span>
-                    <span class="unit">m</span>
                 </div>
                 
                 <div class="reading humidity">
