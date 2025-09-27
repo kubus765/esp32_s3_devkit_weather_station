@@ -33,13 +33,13 @@ struct SensorData {
     float humidity;
 };
 
-const int MAX_DATA_POINTS = 720; // Store 720 readings (24 hours at 2-minute intervals)
+const int MAX_DATA_POINTS = 4320; // Store 4320 readings (30 days at 10-minute intervals)
 SensorData dataBuffer[MAX_DATA_POINTS];
 int dataIndex = 0;
 int dataCount = 0;
 unsigned long lastDataLog = 0;
 unsigned long firstDataLog = 0; // Track first data point timestamp for runtime calculation
-const unsigned long DATA_LOG_INTERVAL = 120000/18; // Log every 2 minutes
+const unsigned long DATA_LOG_INTERVAL = 600000; // Log every 10 minutes
 
 // Server-Sent Events
 struct SSEClient {
@@ -140,15 +140,15 @@ const char* htmlPage = R"rawliteral(
             .nav-buttons {
                 flex-direction: column;
                 align-items: center;
-                gap: 10px;
+                gap: 8px;
             }
             .btn { 
                 display: block; 
-                margin: 5px auto; 
-                width: 80%;
+                margin: 3px auto; 
+                width: 85%;
                 max-width: 200px;
-                padding: 14px 20px;
-                font-size: 15px;
+                padding: 12px 16px;
+                font-size: 14px;
             }
         }
         .reading { 
@@ -322,6 +322,9 @@ const char* htmlPage = R"rawliteral(
         <div class="nav-buttons">
             <button class="btn active" onclick="showChart('6h')">Last 6 Hours</button>
             <button class="btn" onclick="showChart('24h')">Last 24 Hours</button>
+            <button class="btn" onclick="showChart('3d')">Last 3 Days</button>
+            <button class="btn" onclick="showChart('7d')">Last 7 Days</button>
+            <button class="btn" onclick="showChart('30d')">Last 30 Days</button>
             <button class="btn" onclick="showChart('all')">All Data</button>
         </div>
         
@@ -362,24 +365,77 @@ const char* htmlPage = R"rawliteral(
                         borderColor: '#dc3545',
                         backgroundColor: 'rgba(220, 53, 69, 0.1)',
                         tension: 0.4,
-                        yAxisID: 'y'
+                        yAxisID: 'y',
+                        pointRadius: 0, // Hide points for better performance with large datasets
+                        pointHoverRadius: 4
                     }, {
                         label: 'Humidity (%)',
                         data: [],
                         borderColor: '#17a2b8',
                         backgroundColor: 'rgba(23, 162, 184, 0.1)',
                         tension: 0.4,
-                        yAxisID: 'y1'
+                        yAxisID: 'y1',
+                        pointRadius: 0,
+                        pointHoverRadius: 4
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: { intersect: false },
+                    interaction: { 
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    animation: {
+                        duration: 300 // Faster animations for better UX
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: function(context) {
+                                    // Show full date/time in tooltip
+                                    if (context[0] && context[0].parsed) {
+                                        const dataIndex = context[0].dataIndex;
+                                        const dataset = context[0].chart.data.datasets[0];
+                                        if (dataset.timestamps && dataset.timestamps[dataIndex]) {
+                                            const date = new Date(dataset.timestamps[dataIndex] * 1000);
+                                            return date.toLocaleString();
+                                        }
+                                    }
+                                    return context[0].label;
+                                }
+                            }
+                        }
+                    },
                     scales: {
-                        x: { display: true, title: { display: true, text: 'Time' }},
-                        y: { type: 'linear', display: true, position: 'left', title: { display: true, text: 'Temperature (°C)' }},
-                        y1: { type: 'linear', display: true, position: 'right', title: { display: true, text: 'Humidity (%)' }, grid: { drawOnChartArea: false }}
+                        x: { 
+                            display: true, 
+                            title: { display: true, text: 'Time' },
+                            ticks: {
+                                maxTicksLimit: 10, // Limit number of x-axis labels
+                                autoSkip: true
+                            }
+                        },
+                        y: { 
+                            type: 'linear', 
+                            display: true, 
+                            position: 'left', 
+                            title: { display: true, text: 'Temperature (°C)' },
+                            grid: { color: 'rgba(220, 53, 69, 0.1)' }
+                        },
+                        y1: { 
+                            type: 'linear', 
+                            display: true, 
+                            position: 'right', 
+                            title: { display: true, text: 'Humidity (%)' }, 
+                            grid: { drawOnChartArea: false },
+                            min: 0,
+                            max: 100
+                        }
                     }
                 }
             });
@@ -395,16 +451,57 @@ const char* htmlPage = R"rawliteral(
                         data: [],
                         borderColor: '#28a745',
                         backgroundColor: 'rgba(40, 167, 69, 0.1)',
-                        tension: 0.4
+                        tension: 0.4,
+                        pointRadius: 0,
+                        pointHoverRadius: 4
                     }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: { intersect: false },
+                    interaction: { 
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    animation: {
+                        duration: 300
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: function(context) {
+                                    if (context[0] && context[0].parsed) {
+                                        const dataIndex = context[0].dataIndex;
+                                        const dataset = context[0].chart.data.datasets[0];
+                                        if (dataset.timestamps && dataset.timestamps[dataIndex]) {
+                                            const date = new Date(dataset.timestamps[dataIndex] * 1000);
+                                            return date.toLocaleString();
+                                        }
+                                    }
+                                    return context[0].label;
+                                }
+                            }
+                        }
+                    },
                     scales: {
-                        x: { display: true, title: { display: true, text: 'Time' }},
-                        y: { type: 'linear', display: true, position: 'left', title: { display: true, text: 'Pressure (hPa)' }}
+                        x: { 
+                            display: true, 
+                            title: { display: true, text: 'Time' },
+                            ticks: {
+                                maxTicksLimit: 10,
+                                autoSkip: true
+                            }
+                        },
+                        y: { 
+                            type: 'linear', 
+                            display: true, 
+                            position: 'left', 
+                            title: { display: true, text: 'Pressure (hPa)' }
+                        }
                     }
                 }
             });
@@ -439,21 +536,39 @@ const char* htmlPage = R"rawliteral(
                 return;
             }
             
+            // Store timestamps for tooltip display
+            const timestamps = data.map(d => d.timestamp);
+            
             const labels = data.map(d => {
                 const date = new Date(d.timestamp * 1000);
-                return date.toLocaleTimeString();
+                
+                // Format labels based on timeframe and data density
+                if (currentTimeframe === '6h' || currentTimeframe === '24h') {
+                    // Show time only for short periods
+                    return date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+                } else if (currentTimeframe === '3d') {
+                    // Show day and time for 3 days
+                    return date.toLocaleDateString([], {month: 'short', day: 'numeric'}) + ' ' + 
+                           date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+                } else {
+                    // Show date only for longer periods
+                    return date.toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit'});
+                }
             });
             
             console.log('Sample labels:', labels.slice(0, 3));
             
             tempHumidChart.data.labels = labels;
             tempHumidChart.data.datasets[0].data = data.map(d => d.temperature);
+            tempHumidChart.data.datasets[0].timestamps = timestamps; // Store for tooltips
             tempHumidChart.data.datasets[1].data = data.map(d => d.humidity);
-            tempHumidChart.update();
+            tempHumidChart.data.datasets[1].timestamps = timestamps;
+            tempHumidChart.update('none'); // Skip animation for better performance
             
             pressureChart.data.labels = labels;
             pressureChart.data.datasets[0].data = data.map(d => d.pressure);
-            pressureChart.update();
+            pressureChart.data.datasets[0].timestamps = timestamps;
+            pressureChart.update('none'); // Skip animation for better performance
         }
         
         function updateStats(data) {
@@ -466,6 +581,25 @@ const char* htmlPage = R"rawliteral(
             document.getElementById('temp-min').textContent = Math.min(...temps).toFixed(1);
             document.getElementById('temp-max').textContent = Math.max(...temps).toFixed(1);
             document.getElementById('humid-avg').textContent = (humids.reduce((a,b) => a+b) / humids.length).toFixed(1);
+            
+            // Update data range info
+            if (data.length > 0) {
+                const startDate = new Date(data[0].timestamp * 1000);
+                const endDate = new Date(data[data.length - 1].timestamp * 1000);
+                const rangeText = `${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}`;
+                
+                // Update chart titles with date range - target the correct chart cards
+                const chartCards = document.querySelectorAll('.card');
+                const tempHumidCard = chartCards[3]; // 4th card (Temperature & Humidity History)
+                const pressureCard = chartCards[4]; // 5th card (Pressure History)
+                
+                if (tempHumidCard && tempHumidCard.querySelector('h3')) {
+                    tempHumidCard.querySelector('h3').textContent = `Temperature & Humidity History (${rangeText})`;
+                }
+                if (pressureCard && pressureCard.querySelector('h3')) {
+                    pressureCard.querySelector('h3').textContent = `Pressure History (${rangeText})`;
+                }
+            }
         }
         
         function updateCurrentReadings() {
@@ -901,11 +1035,17 @@ void handleHistory() {
     Serial.println("Total data count: " + String(dataCount));
     Serial.println("Data index: " + String(dataIndex));
     
-    // Filter data based on requested timeframe
+    // Filter data based on requested timeframe (10-minute intervals)
     if (range == "6h") {
-        pointsToReturn = min(dataCount, 180); // 6 hours = 180 points (2-min intervals)
+        pointsToReturn = min(dataCount, 36); // 6 hours = 36 points (10-min intervals)
     } else if (range == "24h") {
-        pointsToReturn = min(dataCount, 720); // 24 hours = 720 points
+        pointsToReturn = min(dataCount, 144); // 24 hours = 144 points
+    } else if (range == "3d") {
+        pointsToReturn = min(dataCount, 432); // 3 days = 432 points
+    } else if (range == "7d") {
+        pointsToReturn = min(dataCount, 1008); // 7 days = 1008 points
+    } else if (range == "30d") {
+        pointsToReturn = min(dataCount, 4320); // 30 days = 4320 points (all data)
     }
     // "all" returns all available data
     
