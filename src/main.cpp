@@ -53,6 +53,17 @@ const char* CONFIG_FILE = "/config.json";
 const int SAVE_BATCH_SIZE = 5; // Save to flash every 5 new data points
 int unsavedDataCount = 0;
 
+// Serial Monitor Buffer for web interface
+struct SerialMessage {
+    unsigned long timestamp;
+    String message;
+};
+
+const int MAX_SERIAL_MESSAGES = 100; // Store last 100 serial messages
+SerialMessage serialBuffer[MAX_SERIAL_MESSAGES];
+int serialIndex = 0;
+int serialCount = 0;
+
 // Server-Sent Events
 struct SSEClient {
     WiFiClient client;
@@ -358,6 +369,7 @@ const char* htmlPage = R"rawliteral(
             <div>ESP32-S3 with BME280 Sensor</div>
             <div>A.J. 70490 | L.P. 72810</div>
             <div style="margin-top: 15px;">
+                <button class="btn" onclick="window.open('/serial', '_blank')" style="margin: 5px;">Serial Monitor</button>
                 <button class="btn" onclick="exportData('json')" style="margin: 5px;">Export JSON</button>
                 <button class="btn" onclick="exportData('csv')" style="margin: 5px;">Export CSV</button>
             </div>
@@ -749,6 +761,9 @@ const char* htmlPage = R"rawliteral(
 )rawliteral";
 
 // put function declarations here:
+void logToSerial(String message);
+void handleSerialMonitor();
+void handleSerialData();
 bool initializeStorage();
 bool saveDataToFlash();
 bool loadDataFromFlash();
@@ -772,52 +787,52 @@ void setup() {
     Serial.begin(115200);
     delay(2000); // Give time for serial monitor to connect
     
-    Serial.println("Starting ESP32-S3 Weather Station...");
+    logToSerial("Starting ESP32-S3 Weather Station...");
 
     // Initialize I2C with ESP32-S3 available pins
     Wire.begin(21, 20); // SDA = GPIO21, SCL = GPIO20
-    Serial.println("I2C initialized on SDA=21, SCL=20");
+    logToSerial("I2C initialized on SDA=21, SCL=20");
 
     // Scan for I2C devices
-    Serial.println("Scanning for I2C devices...");
+    logToSerial("Scanning for I2C devices...");
     byte error, address;
     int nDevices = 0;
     for(address = 1; address < 127; address++) {
         Wire.beginTransmission(address);
         error = Wire.endTransmission();
         if (error == 0) {
-            Serial.print("I2C device found at address 0x");
-            if (address < 16) Serial.print("0");
-            Serial.println(address, HEX);
+            String addressStr = "I2C device found at address 0x";
+            if (address < 16) addressStr += "0";
+            addressStr += String(address, HEX);
+            logToSerial(addressStr);
             nDevices++;
         }
     }
     if (nDevices == 0) {
-        Serial.println("No I2C devices found!");
+        logToSerial("No I2C devices found!");
     } else {
-        Serial.print("Found ");
-        Serial.print(nDevices);
-        Serial.println(" I2C device(s)");
+        String deviceCountStr = "Found " + String(nDevices);
+        logToSerial(deviceCountStr + " I2C device(s)");
     }
 
     // Initialize BME280 sensor
-    Serial.println("Initializing BME280 sensor...");
+    logToSerial("Initializing BME280 sensor...");
     
     if (!bme.begin(0x76)) {
-        Serial.println("BME280 not found at 0x76, trying 0x77...");
+        logToSerial("BME280 not found at 0x76, trying 0x77...");
         if (!bme.begin(0x77)) {
-            Serial.println("Could not find a valid BME280 sensor, check wiring!");
-            Serial.println("Make sure:");
-            Serial.println("- VCC -> 3.3V");
-            Serial.println("- GND -> GND");
-            Serial.println("- SDA -> GPIO 21");
-            Serial.println("- SCL -> GPIO 20");
+            logToSerial("Could not find a valid BME280 sensor, check wiring!");
+            logToSerial("Make sure:");
+            logToSerial("- VCC -> 3.3V");
+            logToSerial("- GND -> GND");
+            logToSerial("- SDA -> GPIO 21");
+            logToSerial("- SCL -> GPIO 20");
             while (1);
         } else {
-            Serial.println("BME280 found at address 0x77!");
+            logToSerial("BME280 found at address 0x77!");
         }
     } else {
-        Serial.println("BME280 found at address 0x76!");
+        logToSerial("BME280 found at address 0x76!");
     }
 
     // Configure BME280 settings
@@ -828,18 +843,18 @@ void setup() {
                     Adafruit_BME280::FILTER_X16,
                     Adafruit_BME280::STANDBY_MS_500);
 
-    Serial.println("BME280 sensor initialized successfully!");
+    logToSerial("BME280 sensor initialized successfully!");
 
     // Initialize LittleFS for persistent storage
     if (!initializeStorage()) {
-        Serial.println("Failed to initialize storage system!");
-        Serial.println("Continuing without persistent storage...");
+        logToSerial("Failed to initialize storage system!");
+        logToSerial("Continuing without persistent storage...");
     }
 
     // Connect to WiFi with retry logic
     if (!connectToWiFi()) {
-        Serial.println("Failed to connect to any WiFi network!");
-        Serial.println("Please check your WiFi credentials and network availability.");
+        logToSerial("Failed to connect to any WiFi network!");
+        logToSerial("Please check your WiFi credentials and network availability.");
         // Continue anyway for development/testing
     }
 
@@ -849,25 +864,27 @@ void setup() {
         sseClients[i].lastPing = 0;
     }
     sseClientCount = 0;
-    Serial.println("SSE client array initialized");
+    logToSerial("SSE client array initialized");
 
     // Initialize NTP time
-    Serial.println("Setting up NTP time...");
+    logToSerial("Setting up NTP time...");
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
     // Wait for time to be set
     struct tm timeinfo;
     int attempts = 0;
     while (!getLocalTime(&timeinfo) && attempts < 10) {
-        Serial.println("Failed to obtain time, retrying...");
+        logToSerial("Failed to obtain time, retrying...");
         delay(1000);
         attempts++;
     }
     if (attempts < 10) {
-        Serial.println("Time synchronized successfully!");
-        Serial.println(&timeinfo, "Current time: %A, %B %d %Y %H:%M:%S");
+        logToSerial("Time synchronized successfully!");
+        char timeString[64];
+        strftime(timeString, sizeof(timeString), "Current time: %A, %B %d %Y %H:%M:%S", &timeinfo);
+        logToSerial(String(timeString));
     } else {
-        Serial.println("Failed to sync time, using millis() fallback");
+        logToSerial("Failed to sync time, using millis() fallback");
     }
 
     // Set up web server routes
@@ -877,15 +894,17 @@ void setup() {
     server.on("/memory", handleMemory);
     server.on("/events", handleEvents);
     server.on("/export", handleExport);
+    server.on("/serial", handleSerialMonitor);
+    server.on("/serialdata", handleSerialData);
     server.onNotFound(handleNotFound);
 
     // Start server
     server.begin();
-    Serial.println("HTTP server started");
-    Serial.println("Access the weather station at: http://" + WiFi.localIP().toString());
+    logToSerial("HTTP server started");
+    logToSerial("Access the weather station at: http://" + WiFi.localIP().toString());
     
     // Take initial sensor reading and log data immediately for testing
-    Serial.println("Taking initial sensor reading...");
+    logToSerial("Taking initial sensor reading...");
     readSensorData();
     logSensorData();
     
@@ -923,9 +942,9 @@ void loop() {
     // Periodic auto-save every 5 minutes (in case of unexpected restart)
     static unsigned long lastAutoSave = 0;
     if (millis() - lastAutoSave > 300000 && unsavedDataCount > 0) { // 5 minutes
-        Serial.println("Periodic auto-save triggered (unsaved: " + String(unsavedDataCount) + " points)");
+        logToSerial("Periodic auto-save triggered (unsaved: " + String(unsavedDataCount) + " points)");
         if (saveDataToFlash()) {
-            Serial.println("Periodic auto-save successful!");
+            logToSerial("Periodic auto-save successful!");
             unsavedDataCount = 0;
         }
         lastAutoSave = millis();
@@ -979,11 +998,12 @@ void readSensorData() {
     pressure = bme.readPressure() / 100.0; // Convert Pa to hPa
     humidity = bme.readHumidity();
 
-    Serial.println("=== Sensor Readings ===");
-    Serial.println("Temperature: " + String(temperature) + " °C");
-    Serial.println("Pressure: " + String(pressure) + " hPa");
-    Serial.println("Humidity: " + String(humidity) + " %");
-    Serial.println();
+    // Uncomment for debugging sensor readings:
+    // logToSerial("=== Sensor Readings ===");
+    // logToSerial("Temperature: " + String(temperature) + " °C");
+    // logToSerial("Pressure: " + String(pressure) + " hPa");
+    // logToSerial("Humidity: " + String(humidity) + " %");
+    // logToSerial();
 }
 
 void logSensorData() {
@@ -1005,20 +1025,26 @@ void logSensorData() {
     char timeStr[64];
     strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", timeinfo);
     
-    Serial.println("=== Data Logged ===");
-    Serial.println("Timestamp: " + String(timestamp) + " (" + String(timeStr) + ")");
-    Serial.println("Index: " + String(dataIndex));
-    Serial.println("Temperature: " + String(temperature, 2) + "°C");
-    Serial.println("Pressure: " + String(pressure, 2) + "hPa");
-    Serial.println("Humidity: " + String(humidity, 2) + "%");
+    // Simplified logging - just show essential info
+    logToSerial("Data logged: " + String(dataCount) + " points, " + String(timeStr) + 
+                  " [" + String(temperature, 1) + "°C, " + String(humidity, 1) + "%, " + String(pressure, 1) + "hPa]");
+    
+    // Uncomment for detailed debugging:
+    // logToSerial("=== Data Logged ===");
+    // logToSerial("Timestamp: " + String(timestamp) + " (" + String(timeStr) + ")");
+    // logToSerial("Index: " + String(dataIndex));
+    // logToSerial("Temperature: " + String(temperature, 2) + "°C");
+    // logToSerial("Pressure: " + String(pressure, 2) + "hPa");
+    // logToSerial("Humidity: " + String(humidity, 2) + "%");
     
     dataIndex = (dataIndex + 1) % MAX_DATA_POINTS;
     if (dataCount < MAX_DATA_POINTS) {
         dataCount++;
     }
     
-    Serial.println("Total data points: " + String(dataCount));
-    Serial.println("Next index: " + String(dataIndex));
+    // Uncomment for detailed debugging:
+    // logToSerial("Total data points: " + String(dataCount));
+    // logToSerial("Next index: " + String(dataIndex));
     
     // Increment unsaved data counter
     unsavedDataCount++;
@@ -1028,28 +1054,28 @@ void logSensorData() {
     if (dataCount <= 3) {
         // Save first 3 data points immediately to ensure persistence
         shouldSave = true;
-        Serial.println("Saving initial data point immediately...");
+        logToSerial("Saving initial data point immediately...");
     } else if (unsavedDataCount >= SAVE_BATCH_SIZE) {
         // Regular batch save
         shouldSave = true;
-        Serial.println("Saving data batch to flash storage...");
+        logToSerial("Saving data batch to flash storage...");
     }
     
     if (shouldSave) {
         if (saveDataToFlash()) {
-            Serial.println("Data saved to flash successfully! (" + String(dataCount) + " total points)");
+            logToSerial("Data saved to flash successfully! (" + String(dataCount) + " total points)");
             unsavedDataCount = 0;
         } else {
-            Serial.println("Failed to save data to flash!");
+            logToSerial("Failed to save data to flash!");
         }
     }
     
-    // Memory information
-    size_t freeRAM = ESP.getFreeHeap();
-    size_t totalRAM = ESP.getHeapSize();
-    Serial.println("Free RAM: " + String(freeRAM) + " bytes (" + String(freeRAM/1024) + " KB)");
-    Serial.println("RAM usage: " + String((float)(totalRAM - freeRAM) * 100.0 / totalRAM, 1) + "%");
-    Serial.println("========================");
+    // Uncomment for memory usage debugging:
+    // size_t freeRAM = ESP.getFreeHeap();
+    // size_t totalRAM = ESP.getHeapSize();
+    // logToSerial("Free RAM: " + String(freeRAM) + " bytes (" + String(freeRAM/1024) + " KB)");
+    // logToSerial("RAM usage: " + String((float)(totalRAM - freeRAM) * 100.0 / totalRAM, 1) + "%");
+    // logToSerial("========================");
 }
 
 void handleRoot() {
@@ -1104,10 +1130,10 @@ void handleHistory() {
     String range = server.arg("range");
     int pointsToReturn = dataCount;
     
-    Serial.println("=== History Request ===");
-    Serial.println("Range: " + range);
-    Serial.println("Total data count: " + String(dataCount));
-    Serial.println("Data index: " + String(dataIndex));
+    logToSerial("=== History Request ===");
+    logToSerial("Range: " + range);
+    logToSerial("Total data count: " + String(dataCount));
+    logToSerial("Data index: " + String(dataIndex));
     
     // Filter data based on requested timeframe (10-minute intervals)
     if (range == "6h") {
@@ -1123,7 +1149,7 @@ void handleHistory() {
     }
     // "all" returns all available data
     
-    Serial.println("Points to return: " + String(pointsToReturn));
+    logToSerial("Points to return: " + String(pointsToReturn));
     
     String json = "[";
     
@@ -1137,7 +1163,7 @@ void handleHistory() {
             startIndex = (dataIndex - pointsToReturn + MAX_DATA_POINTS) % MAX_DATA_POINTS;
         }
         
-        Serial.println("Start index: " + String(startIndex));
+        logToSerial("Start index: " + String(startIndex));
         
         for (int i = 0; i < pointsToReturn; i++) {
             int index = (startIndex + i) % MAX_DATA_POINTS;
@@ -1152,17 +1178,18 @@ void handleHistory() {
     }
     
     json += "]";
-    Serial.println("JSON length: " + String(json.length()));
-    Serial.println("========================");
+    logToSerial("JSON length: " + String(json.length()));
+    logToSerial("========================");
     
     server.send(200, "application/json", json);
 }
 
 void handleMemory() {
-    Serial.println("=== Memory Info Request ===");
+    // Uncomment for debugging memory requests:
+    // logToSerial("=== Memory Info Request ===");
     String memInfo = getMemoryInfo();
-    Serial.println("Memory info: " + memInfo);
-    Serial.println("===========================");
+    // logToSerial("Memory info: " + memInfo);
+    // logToSerial("===========================");
     server.send(200, "application/json", memInfo);
 }
 
@@ -1202,7 +1229,7 @@ void handleEvents() {
     sseClients[clientIndex].active = true;
     sseClientCount++;
     
-    Serial.println("New SSE client connected. Total clients: " + String(sseClientCount));
+    // Note: Removed logToSerial call here to prevent recursion
     
     // Send initial connection message
     String initialMessage = "data: {\"type\":\"connected\",\"message\":\"SSE connection established\"}\n\n";
@@ -1215,7 +1242,7 @@ void broadcastSSE(String message) {
     
     String sseMessage = "data: " + message + "\n\n";
     
-    Serial.println("Broadcasting SSE message to " + String(sseClientCount) + " clients: " + message);
+    // Note: Removed logToSerial call here to prevent infinite recursion
     
     for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
         if (sseClients[i].active) {
@@ -1227,14 +1254,14 @@ void broadcastSSE(String message) {
                     sseClients[i].active = false;
                     sseClients[i].client.stop();
                     sseClientCount--;
-                    Serial.println("SSE client " + String(i) + " disconnected (write failed)");
+                    // Note: Removed logToSerial call here to prevent recursion
                 }
             } else {
                 // Client disconnected
                 sseClients[i].active = false;
                 sseClients[i].client.stop();
                 sseClientCount--;
-                Serial.println("SSE client " + String(i) + " disconnected");
+                // Note: Removed logToSerial call here to prevent recursion
             }
         }
     }
@@ -1247,7 +1274,7 @@ void cleanupSSEClients() {
                 sseClients[i].active = false;
                 sseClients[i].client.stop();
                 sseClientCount--;
-                Serial.println("Cleaned up disconnected SSE client " + String(i));
+                // Note: Removed logToSerial call here to prevent recursion
             } else {
                 // Send keepalive ping every 30 seconds
                 if (millis() - sseClients[i].lastPing > 30000) {
@@ -1261,34 +1288,32 @@ void cleanupSSEClients() {
                         sseClients[i].active = false;
                         sseClients[i].client.stop();
                         sseClientCount--;
-                        Serial.println("SSE client " + String(i) + " removed (ping failed)");
+                        // Note: Removed logToSerial call here to prevent recursion
                     }
                 }
             }
         }
     }
     
-    if (sseClientCount > 0) {
-        Serial.println("SSE cleanup complete. Active clients: " + String(sseClientCount));
-    }
+    // Note: Removed SSE cleanup complete message to prevent recursion
 }
 
 bool initializeStorage() {
-    Serial.println("Initializing LittleFS...");
+    logToSerial("Initializing LittleFS...");
     if (!LittleFS.begin(true)) {
-        Serial.println("LittleFS mount failed!");
+        logToSerial("LittleFS mount failed!");
         return false;
     }
     
-    Serial.println("LittleFS mounted successfully!");
+    logToSerial("LittleFS mounted successfully!");
     
     // Print storage info
     size_t totalBytes = LittleFS.totalBytes();
     size_t usedBytes = LittleFS.usedBytes();
-    Serial.println("Storage Info:");
-    Serial.println("  Total: " + String(totalBytes / 1024) + " KB");
-    Serial.println("  Used: " + String(usedBytes / 1024) + " KB");
-    Serial.println("  Free: " + String((totalBytes - usedBytes) / 1024) + " KB");
+    logToSerial("Storage Info:");
+    logToSerial("  Total: " + String(totalBytes / 1024) + " KB");
+    logToSerial("  Used: " + String(usedBytes / 1024) + " KB");
+    logToSerial("  Free: " + String((totalBytes - usedBytes) / 1024) + " KB");
     
     // Try to load existing data
     loadDataFromFlash();
@@ -1298,16 +1323,16 @@ bool initializeStorage() {
 
 bool saveDataToFlash() {
     // Ensure directory exists (though LittleFS doesn't really have directories)
-    Serial.println("Attempting to save " + String(dataCount) + " data points to flash...");
+    logToSerial("Attempting to save " + String(dataCount) + " data points to flash...");
     
     File dataFile = LittleFS.open(DATA_FILE, "w", true); // true = create if not exists
     if (!dataFile) {
-        Serial.println("Failed to open data file for writing!");
-        Serial.println("LittleFS info: Total=" + String(LittleFS.totalBytes()) + ", Used=" + String(LittleFS.usedBytes()));
+        logToSerial("Failed to open data file for writing!");
+        logToSerial("LittleFS info: Total=" + String(LittleFS.totalBytes()) + ", Used=" + String(LittleFS.usedBytes()));
         return false;
     }
     
-    Serial.println("Data file opened successfully for writing");
+    logToSerial("Data file opened successfully for writing");
     
     // Create JSON document
     DynamicJsonDocument doc(32768); // 32KB for JSON document
@@ -1341,23 +1366,23 @@ bool saveDataToFlash() {
     dataFile.close();
     
     if (bytesWritten > 0) {
-        Serial.println("Data saved: " + String(bytesWritten) + " bytes, " + String(dataCount) + " data points");
+        logToSerial("Data saved: " + String(bytesWritten) + " bytes, " + String(dataCount) + " data points");
         return true;
     } else {
-        Serial.println("Failed to write data to file!");
+        logToSerial("Failed to write data to file!");
         return false;
     }
 }
 
 bool loadDataFromFlash() {
     if (!LittleFS.exists(DATA_FILE)) {
-        Serial.println("No existing data file found - starting fresh");
+        logToSerial("No existing data file found - starting fresh");
         return true; // This is OK for first run
     }
     
     File dataFile = LittleFS.open(DATA_FILE, "r");
     if (!dataFile) {
-        Serial.println("Failed to open data file for reading!");
+        logToSerial("Failed to open data file for reading!");
         return false;
     }
     
@@ -1367,8 +1392,8 @@ bool loadDataFromFlash() {
     dataFile.close();
     
     if (error) {
-        Serial.println("Failed to parse JSON data file!");
-        Serial.println("Error: " + String(error.c_str()));
+        logToSerial("Failed to parse JSON data file!");
+        logToSerial("Error: " + String(error.c_str()));
         return false;
     }
     
@@ -1395,16 +1420,16 @@ bool loadDataFromFlash() {
     dataCount = loadedPoints;
     dataIndex = dataCount % MAX_DATA_POINTS;
     
-    Serial.println("Loaded " + String(dataCount) + " data points from flash storage");
+    logToSerial("Loaded " + String(dataCount) + " data points from flash storage");
     if (dataCount > 0) {
-        Serial.println("Data range: " + String(dataBuffer[0].timestamp) + " to " + String(dataBuffer[dataCount-1].timestamp));
+        logToSerial("Data range: " + String(dataBuffer[0].timestamp) + " to " + String(dataBuffer[dataCount-1].timestamp));
     }
     
     return true;
 }
 
 void handleExport() {
-    Serial.println("Export request received");
+    logToSerial("Export request received");
     
     String format = server.arg("format");
     if (format == "" || format == "json") {
@@ -1467,11 +1492,191 @@ void handleExport() {
     }
 }
 
+void logToSerial(String message) {
+    // Store message in circular buffer
+    serialBuffer[serialIndex].timestamp = millis() / 1000; // Use fast millis() for serial logging
+    serialBuffer[serialIndex].message = message;
+    
+    serialIndex = (serialIndex + 1) % MAX_SERIAL_MESSAGES;
+    if (serialCount < MAX_SERIAL_MESSAGES) {
+        serialCount++;
+    }
+    
+    // Also print to actual serial
+    Serial.println(message);
+    
+    // NO SSE broadcasting here to prevent infinite recursion
+}
+
+void handleSerialData() {
+    String json = "[";
+    
+    for (int i = 0; i < serialCount; i++) {
+        int index;
+        if (serialCount < MAX_SERIAL_MESSAGES) {
+            index = i;
+        } else {
+            index = (serialIndex + i) % MAX_SERIAL_MESSAGES;
+        }
+        
+        if (i > 0) json += ",";
+        json += "{";
+        json += "\"timestamp\":" + String(serialBuffer[index].timestamp) + ",";
+        json += "\"message\":\"" + serialBuffer[index].message + "\"";
+        json += "}";
+    }
+    
+    json += "]";
+    server.send(200, "application/json", json);
+}
+
+void handleSerialMonitor() {
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Serial Monitor - ESP32 Weather Station</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: 'Courier New', monospace; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #1e1e1e; 
+            color: #d4d4d4;
+        }
+        .header {
+            background-color: #2d2d30;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .serial-output {
+            background-color: #0c0c0c;
+            border: 1px solid #3e3e42;
+            border-radius: 5px;
+            padding: 15px;
+            height: 70vh;
+            overflow-y: auto;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            word-wrap: break-word;
+        }
+        .timestamp {
+            color: #569cd6;
+            margin-right: 10px;
+        }
+        .controls {
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .btn {
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            margin: 0 5px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .btn:hover { background: #1177bb; }
+        .status {
+            color: #4ec9b0;
+            font-size: 11px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>🖥️ Serial Monitor - ESP32 Weather Station</h2>
+        <div class="controls">
+            <button class="btn" onclick="refreshLogs()">Refresh</button>
+            <button class="btn" onclick="clearLogs()">Clear</button>
+            <button class="btn" onclick="toggleAutoUpdate()">Auto Update: <span id="auto-status">ON</span></button>
+            <button class="btn" onclick="window.close()">Close</button>
+        </div>
+        <div class="status" id="status">Connected • Last update: <span id="last-update">Never</span></div>
+    </div>
+    
+    <div class="serial-output" id="serial-output">
+        Loading serial data...
+    </div>
+
+    <script>
+        let autoUpdate = true;
+        let updateInterval;
+
+        function formatTimestamp(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleTimeString();
+        }
+
+        function refreshLogs() {
+            fetch('/serialdata')
+                .then(response => response.json())
+                .then(data => {
+                    const output = document.getElementById('serial-output');
+                    output.innerHTML = '';
+                    
+                    data.forEach(entry => {
+                        const div = document.createElement('div');
+                        div.className = 'log-entry';
+                        div.innerHTML = `<span class="timestamp">[${formatTimestamp(entry.timestamp)}]</span>${entry.message}`;
+                        output.appendChild(div);
+                    });
+                    
+                    // Auto-scroll to bottom
+                    output.scrollTop = output.scrollHeight;
+                    
+                    // Update status
+                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                })
+                .catch(error => {
+                    console.error('Error fetching serial data:', error);
+                    document.getElementById('status').textContent = 'Error loading data';
+                });
+        }
+
+        function clearLogs() {
+            document.getElementById('serial-output').innerHTML = '<div class="log-entry">--- Logs cleared locally ---</div>';
+        }
+
+        function toggleAutoUpdate() {
+            autoUpdate = !autoUpdate;
+            document.getElementById('auto-status').textContent = autoUpdate ? 'ON' : 'OFF';
+            
+            if (autoUpdate) {
+                updateInterval = setInterval(refreshLogs, 2000); // Update every 2 seconds
+            } else {
+                clearInterval(updateInterval);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshLogs();
+            updateInterval = setInterval(refreshLogs, 2000); // Auto-refresh every 2 seconds
+        });
+    </script>
+</body>
+</html>
+)rawliteral";
+    
+    server.send(200, "text/html", html);
+}
+
 bool connectToWiFi() {
     // Try primary WiFi first (3 attempts)
-    Serial.println("Attempting to connect to primary WiFi: " + String(ssid));
+    logToSerial("Attempting to connect to primary WiFi: " + String(ssid));
     for (int attempt = 1; attempt <= 3; attempt++) {
-        Serial.println("Primary WiFi attempt " + String(attempt) + "/3");
+        logToSerial("Primary WiFi attempt " + String(attempt) + "/3");
         WiFi.begin(ssid, password);
         
         // Wait up to 20 seconds for connection
@@ -1483,24 +1688,23 @@ bool connectToWiFi() {
         }
         
         if (WiFi.status() == WL_CONNECTED) {
-            Serial.println();
-            Serial.println("Primary WiFi connected successfully!");
-            Serial.print("IP address: ");
-            Serial.println(WiFi.localIP());
+            logToSerial("");
+            logToSerial("Primary WiFi connected successfully!");
+            logToSerial("IP address: " + WiFi.localIP().toString());
             return true;
         }
         
-        Serial.println();
-        Serial.println("Primary WiFi connection failed on attempt " + String(attempt));
+        logToSerial("");
+        logToSerial("Primary WiFi connection failed on attempt " + String(attempt));
         WiFi.disconnect();
         delay(500); // Wait 2 seconds before next attempt
     }
     
     // If primary WiFi failed, try secondary WiFi (if configured)
     if (strlen(ssid2) > 0) {
-        Serial.println("Attempting to connect to secondary WiFi: " + String(ssid2));
+        logToSerial("Attempting to connect to secondary WiFi: " + String(ssid2));
         for (int attempt = 1; attempt <= 3; attempt++) {
-            Serial.println("Secondary WiFi attempt " + String(attempt) + "/3");
+            logToSerial("Secondary WiFi attempt " + String(attempt) + "/3");
             WiFi.begin(ssid2, password2);
             
             // Wait up to 20 seconds for connection
@@ -1512,22 +1716,21 @@ bool connectToWiFi() {
             }
             
             if (WiFi.status() == WL_CONNECTED) {
-                Serial.println();
-                Serial.println("Secondary WiFi connected successfully!");
-                Serial.print("IP address: ");
-                Serial.println(WiFi.localIP());
+                logToSerial("");
+                logToSerial("Secondary WiFi connected successfully!");
+                logToSerial("IP address: " + WiFi.localIP().toString());
                 return true;
             }
             
-            Serial.println();
-            Serial.println("Secondary WiFi connection failed on attempt " + String(attempt));
+            logToSerial("");
+            logToSerial("Secondary WiFi connection failed on attempt " + String(attempt));
             WiFi.disconnect();
             delay(500); // Wait 2 seconds before next attempt
         }
     } else {
-        Serial.println("No secondary WiFi configured. Please provide secondary WiFi credentials if needed.");
+        logToSerial("No secondary WiFi configured. Please provide secondary WiFi credentials if needed.");
     }
     
-    Serial.println("All WiFi connection attempts failed!");
+    logToSerial("All WiFi connection attempts failed!");
     return false;
 }
