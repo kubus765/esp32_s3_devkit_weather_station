@@ -4,10 +4,16 @@
 #include <Wire.h>
 #include <Adafruit_BME280.h>
 #include <time.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 
-// WiFi credentials
+// Primary WiFi credentials
 const char* ssid = "UPC6628674";
 const char* password = "Ar6jxnrurxhe";
+
+// Secondary WiFi credentials (to be set later)
+const char* ssid2 = "5GTowerTest";
+const char* password2 = "stopcham";
 
 // NTP Configuration
 const char* ntpServer = "pool.ntp.org";
@@ -39,7 +45,13 @@ int dataIndex = 0;
 int dataCount = 0;
 unsigned long lastDataLog = 0;
 unsigned long firstDataLog = 0; // Track first data point timestamp for runtime calculation
-const unsigned long DATA_LOG_INTERVAL = 600000; // Log every 10 minutes
+const unsigned long DATA_LOG_INTERVAL = 600000/20; // Log every 10 minutes
+
+// Persistent storage configuration
+const char* DATA_FILE = "/sensor_data.json";
+const char* CONFIG_FILE = "/config.json";
+const int SAVE_BATCH_SIZE = 10; // Save to flash every 10 new data points
+int unsavedDataCount = 0;
 
 // Server-Sent Events
 struct SSEClient {
@@ -345,6 +357,10 @@ const char* htmlPage = R"rawliteral(
         <div class="info">
             <div>ESP32-S3 with BME280 Sensor</div>
             <div>A.J. 70490 | L.P. 72810</div>
+            <div style="margin-top: 15px;">
+                <button class="btn" onclick="exportData('json')" style="margin: 5px;">Export JSON</button>
+                <button class="btn" onclick="exportData('csv')" style="margin: 5px;">Export CSV</button>
+            </div>
         </div>
     </div>
 
@@ -705,6 +721,22 @@ const char* htmlPage = R"rawliteral(
             setInterval(updateMemoryInfo, 60000);
         });
         
+        // Export data function
+        function exportData(format) {
+            const url = '/export?format=' + format;
+            const filename = 'weather_data_' + new Date().toISOString().slice(0,10) + '.' + format;
+            
+            // Create a temporary link element and trigger download
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            console.log('Exporting data in ' + format.toUpperCase() + ' format');
+        }
+        
         // Clean up on page unload
         window.addEventListener('beforeunload', function() {
             if (eventSource) {
@@ -717,6 +749,11 @@ const char* htmlPage = R"rawliteral(
 )rawliteral";
 
 // put function declarations here:
+bool initializeStorage();
+bool saveDataToFlash();
+bool loadDataFromFlash();
+void handleExport();
+bool connectToWiFi();
 unsigned long getCurrentTimestamp();
 String getMemoryInfo();
 void readSensorData();
@@ -793,17 +830,18 @@ void setup() {
 
     Serial.println("BME280 sensor initialized successfully!");
 
-    // Connect to WiFi
-    WiFi.begin(ssid, password);
-    Serial.print("Connecting to WiFi");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    // Initialize LittleFS for persistent storage
+    if (!initializeStorage()) {
+        Serial.println("Failed to initialize storage system!");
+        Serial.println("Continuing without persistent storage...");
     }
-    Serial.println();
-    Serial.println("WiFi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+
+    // Connect to WiFi with retry logic
+    if (!connectToWiFi()) {
+        Serial.println("Failed to connect to any WiFi network!");
+        Serial.println("Please check your WiFi credentials and network availability.");
+        // Continue anyway for development/testing
+    }
 
     // Initialize SSE client array
     for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
@@ -838,6 +876,7 @@ void setup() {
     server.on("/history", handleHistory);
     server.on("/memory", handleMemory);
     server.on("/events", handleEvents);
+    server.on("/export", handleExport);
     server.onNotFound(handleNotFound);
 
     // Start server
@@ -969,6 +1008,20 @@ void logSensorData() {
     
     Serial.println("Total data points: " + String(dataCount));
     Serial.println("Next index: " + String(dataIndex));
+    
+    // Increment unsaved data counter
+    unsavedDataCount++;
+    
+    // Save to flash storage periodically (batch saves for efficiency)
+    if (unsavedDataCount >= SAVE_BATCH_SIZE) {
+        Serial.println("Saving data batch to flash storage...");
+        if (saveDataToFlash()) {
+            Serial.println("Data batch saved to flash successfully!");
+            unsavedDataCount = 0;
+        } else {
+            Serial.println("Failed to save data batch to flash!");
+        }
+    }
     
     // Memory information
     size_t freeRAM = ESP.getFreeHeap();
@@ -1197,4 +1250,257 @@ void cleanupSSEClients() {
     if (sseClientCount > 0) {
         Serial.println("SSE cleanup complete. Active clients: " + String(sseClientCount));
     }
+}
+
+bool initializeStorage() {
+    Serial.println("Initializing LittleFS...");
+    if (!LittleFS.begin(true)) {
+        Serial.println("LittleFS mount failed!");
+        return false;
+    }
+    
+    Serial.println("LittleFS mounted successfully!");
+    
+    // Print storage info
+    size_t totalBytes = LittleFS.totalBytes();
+    size_t usedBytes = LittleFS.usedBytes();
+    Serial.println("Storage Info:");
+    Serial.println("  Total: " + String(totalBytes / 1024) + " KB");
+    Serial.println("  Used: " + String(usedBytes / 1024) + " KB");
+    Serial.println("  Free: " + String((totalBytes - usedBytes) / 1024) + " KB");
+    
+    // Try to load existing data
+    loadDataFromFlash();
+    
+    return true;
+}
+
+bool saveDataToFlash() {
+    File dataFile = LittleFS.open(DATA_FILE, "w");
+    if (!dataFile) {
+        Serial.println("Failed to open data file for writing!");
+        return false;
+    }
+    
+    // Create JSON document
+    DynamicJsonDocument doc(32768); // 32KB for JSON document
+    JsonArray dataArray = doc.createNestedArray("data");
+    
+    // Save metadata
+    doc["version"] = "1.0";
+    doc["totalPoints"] = dataCount;
+    doc["maxPoints"] = MAX_DATA_POINTS;
+    doc["firstDataLog"] = firstDataLog;
+    doc["lastUpdate"] = getCurrentTimestamp();
+    
+    // Add all data points to JSON
+    for (int i = 0; i < dataCount; i++) {
+        int index;
+        if (dataCount < MAX_DATA_POINTS) {
+            index = i; // Linear array, not circular yet
+        } else {
+            index = (dataIndex + i) % MAX_DATA_POINTS; // Circular buffer
+        }
+        
+        JsonObject dataPoint = dataArray.createNestedObject();
+        dataPoint["timestamp"] = dataBuffer[index].timestamp;
+        dataPoint["temperature"] = dataBuffer[index].temperature;
+        dataPoint["pressure"] = dataBuffer[index].pressure;
+        dataPoint["humidity"] = dataBuffer[index].humidity;
+    }
+    
+    // Write JSON to file
+    size_t bytesWritten = serializeJson(doc, dataFile);
+    dataFile.close();
+    
+    if (bytesWritten > 0) {
+        Serial.println("Data saved: " + String(bytesWritten) + " bytes, " + String(dataCount) + " data points");
+        return true;
+    } else {
+        Serial.println("Failed to write data to file!");
+        return false;
+    }
+}
+
+bool loadDataFromFlash() {
+    if (!LittleFS.exists(DATA_FILE)) {
+        Serial.println("No existing data file found - starting fresh");
+        return true; // This is OK for first run
+    }
+    
+    File dataFile = LittleFS.open(DATA_FILE, "r");
+    if (!dataFile) {
+        Serial.println("Failed to open data file for reading!");
+        return false;
+    }
+    
+    // Read and parse JSON
+    DynamicJsonDocument doc(32768); // 32KB for JSON document
+    DeserializationError error = deserializeJson(doc, dataFile);
+    dataFile.close();
+    
+    if (error) {
+        Serial.println("Failed to parse JSON data file!");
+        Serial.println("Error: " + String(error.c_str()));
+        return false;
+    }
+    
+    // Load metadata
+    if (doc.containsKey("firstDataLog")) {
+        firstDataLog = doc["firstDataLog"];
+    }
+    
+    // Load data points
+    JsonArray dataArray = doc["data"];
+    int loadedPoints = 0;
+    
+    for (JsonObject dataPoint : dataArray) {
+        if (loadedPoints >= MAX_DATA_POINTS) break;
+        
+        dataBuffer[loadedPoints].timestamp = dataPoint["timestamp"];
+        dataBuffer[loadedPoints].temperature = dataPoint["temperature"];
+        dataBuffer[loadedPoints].pressure = dataPoint["pressure"];
+        dataBuffer[loadedPoints].humidity = dataPoint["humidity"];
+        
+        loadedPoints++;
+    }
+    
+    dataCount = loadedPoints;
+    dataIndex = dataCount % MAX_DATA_POINTS;
+    
+    Serial.println("Loaded " + String(dataCount) + " data points from flash storage");
+    if (dataCount > 0) {
+        Serial.println("Data range: " + String(dataBuffer[0].timestamp) + " to " + String(dataBuffer[dataCount-1].timestamp));
+    }
+    
+    return true;
+}
+
+void handleExport() {
+    Serial.println("Export request received");
+    
+    String format = server.arg("format");
+    if (format == "" || format == "json") {
+        // Export as JSON
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.send(200, "application/json", "");
+        
+        server.sendContent("{\"data\":[");
+        
+        for (int i = 0; i < dataCount; i++) {
+            int index;
+            if (dataCount < MAX_DATA_POINTS) {
+                index = i;
+            } else {
+                index = (dataIndex + i) % MAX_DATA_POINTS;
+            }
+            
+            if (i > 0) server.sendContent(",");
+            
+            String dataPoint = "{";
+            dataPoint += "\"timestamp\":" + String(dataBuffer[index].timestamp) + ",";
+            dataPoint += "\"temperature\":" + String(dataBuffer[index].temperature, 2) + ",";
+            dataPoint += "\"pressure\":" + String(dataBuffer[index].pressure, 2) + ",";
+            dataPoint += "\"humidity\":" + String(dataBuffer[index].humidity, 2);
+            dataPoint += "}";
+            
+            server.sendContent(dataPoint);
+        }
+        
+        String footer = "],\"metadata\":{";
+        footer += "\"totalPoints\":" + String(dataCount) + ",";
+        footer += "\"exportTime\":" + String(getCurrentTimestamp()) + ",";
+        footer += "\"device\":\"ESP32-S3 Weather Station\"";
+        footer += "}}";
+        
+        server.sendContent(footer);
+    } else if (format == "csv") {
+        // Export as CSV
+        server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+        server.send(200, "text/csv", "");
+        server.sendContent("timestamp,temperature,pressure,humidity\n");
+        
+        for (int i = 0; i < dataCount; i++) {
+            int index;
+            if (dataCount < MAX_DATA_POINTS) {
+                index = i;
+            } else {
+                index = (dataIndex + i) % MAX_DATA_POINTS;
+            }
+            
+            String line = String(dataBuffer[index].timestamp) + ",";
+            line += String(dataBuffer[index].temperature, 2) + ",";
+            line += String(dataBuffer[index].pressure, 2) + ",";
+            line += String(dataBuffer[index].humidity, 2) + "\n";
+            
+            server.sendContent(line);
+        }
+    } else {
+        server.send(400, "text/plain", "Invalid format. Use ?format=json or ?format=csv");
+    }
+}
+
+bool connectToWiFi() {
+    // Try primary WiFi first (3 attempts)
+    Serial.println("Attempting to connect to primary WiFi: " + String(ssid));
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        Serial.println("Primary WiFi attempt " + String(attempt) + "/3");
+        WiFi.begin(ssid, password);
+        
+        // Wait up to 20 seconds for connection
+        int timeout = 10; // 40 * 500ms = 20 seconds
+        while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+            delay(500);
+            Serial.print(".");
+            timeout--;
+        }
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println();
+            Serial.println("Primary WiFi connected successfully!");
+            Serial.print("IP address: ");
+            Serial.println(WiFi.localIP());
+            return true;
+        }
+        
+        Serial.println();
+        Serial.println("Primary WiFi connection failed on attempt " + String(attempt));
+        WiFi.disconnect();
+        delay(2000); // Wait 2 seconds before next attempt
+    }
+    
+    // If primary WiFi failed, try secondary WiFi (if configured)
+    if (strlen(ssid2) > 0) {
+        Serial.println("Attempting to connect to secondary WiFi: " + String(ssid2));
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            Serial.println("Secondary WiFi attempt " + String(attempt) + "/3");
+            WiFi.begin(ssid2, password2);
+            
+            // Wait up to 20 seconds for connection
+            int timeout = 40; // 40 * 500ms = 20 seconds
+            while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+                delay(500);
+                Serial.print(".");
+                timeout--;
+            }
+            
+            if (WiFi.status() == WL_CONNECTED) {
+                Serial.println();
+                Serial.println("Secondary WiFi connected successfully!");
+                Serial.print("IP address: ");
+                Serial.println(WiFi.localIP());
+                return true;
+            }
+            
+            Serial.println();
+            Serial.println("Secondary WiFi connection failed on attempt " + String(attempt));
+            WiFi.disconnect();
+            delay(2000); // Wait 2 seconds before next attempt
+        }
+    } else {
+        Serial.println("No secondary WiFi configured. Please provide secondary WiFi credentials if needed.");
+    }
+    
+    Serial.println("All WiFi connection attempts failed!");
+    return false;
 }
