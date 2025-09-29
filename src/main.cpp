@@ -334,10 +334,6 @@ const char* htmlPage = R"rawliteral(
                         <div class="stat-value" id="ram-free">--</div>
                         <div class="stat-label">Free RAM (KB)</div>
                     </div>
-                    <div class="stat-item">
-                        <div class="stat-value" id="max-points">--</div>
-                        <div class="stat-label">Est. Max Points</div>
-                    </div>
                 </div>
             </div>
         </div>
