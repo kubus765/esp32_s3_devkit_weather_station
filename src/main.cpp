@@ -9,22 +9,76 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 
-// Primary WiFi credentials
-const char* ssid = "UPC6628674";
-const char* password = "Ar6jxnrurxhe";
+// Configuration structure for all configurable settings
+struct WeatherConfig {
+    // WiFi settings
+    char ssid[64];
+    char password[64];
+    char ssid2[64];
+    char password2[64];
+    
+    // Admin credentials
+    char adminUsername[32];
+    char adminPassword[64];
+    
+    // NTP settings
+    char ntpServer[64];
+    long gmtOffset_sec;
+    int daylightOffset_sec;
+    
+    // Data collection settings
+    int maxDataPoints;
+    unsigned long dataLogInterval; // in milliseconds
+    int saveBatchSize;
+    
+    // Interface settings
+    int maxSerialMessages;
+    int maxSSEClients;
+    
+    // System settings
+    bool dataCollectionEnabled;
+};
 
-// Secondary WiFi credentials (to be set later)
-const char* ssid2 = "5GTowerTest";
-const char* password2 = "stopcham";
+// Global configuration with default values
+WeatherConfig config = {
+    // WiFi defaults - primary wifi ssid&password, secondary wifi ssid&password
+    "UPC6628674",
+    "Ar6jxnrurxhe", 
+    "5GTowerTest",
+    "stopcham",
+    
+    // Admin defaults
+    "admin",
+    "weather2025!",
+    
+    // NTP defaults
+    "pool.ntp.org",
+    3600,  // GMT+1
+    3600,  // DST offset
+    
+    // Data collection defaults
+    4320,  // 30 days at 10-minute intervals
+    600000, // 10 minutes in milliseconds
+    5,     // Save every 5 points
+    
+    // Interface defaults
+    100,   // Serial messages
+    5,     // SSE clients
+    
+    // System defaults
+    true   // Data collection enabled
+};
 
-// Admin credentials for protected endpoints
-const char* adminUsername = "admin";
-const char* adminPassword = "weather2025!"; // Change this to your preferred password
-
-// NTP Configuration
-const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 3600;     // GMT+1 for Central Europe (adjust for your timezone)
-const int daylightOffset_sec = 3600; // Daylight saving time offset
+// Legacy pointers for compatibility (will point to config struct)
+const char* ssid = config.ssid;
+const char* password = config.password;
+const char* ssid2 = config.ssid2;
+const char* password2 = config.password2;
+const char* adminUsername = config.adminUsername;
+const char* adminPassword = config.adminPassword;
+const char* ntpServer = config.ntpServer;
+const long& gmtOffset_sec = config.gmtOffset_sec;
+const int& daylightOffset_sec = config.daylightOffset_sec;
 
 // Create BME280 object
 Adafruit_BME280 bme;
@@ -45,18 +99,16 @@ struct SensorData {
     float humidity;
 };
 
-const int MAX_DATA_POINTS = 4320; // Store 4320 readings (30 days at 10-minute intervals)
-SensorData dataBuffer[MAX_DATA_POINTS];
+// Dynamic data buffer (will be allocated based on config)
+SensorData* dataBuffer = nullptr;
 int dataIndex = 0;
 int dataCount = 0;
 unsigned long lastDataLog = 0;
 unsigned long firstDataLog = 0; // Track first data point timestamp for runtime calculation
-const unsigned long DATA_LOG_INTERVAL = 600000; // Log every 10 minutes
 
 // Persistent storage configuration
 const char* DATA_FILE = "/sensor_data.json";
 const char* CONFIG_FILE = "/config.json";
-const int SAVE_BATCH_SIZE = 5; // Save to flash every 5 new data points
 int unsavedDataCount = 0;
 
 // Serial Monitor Buffer for web interface
@@ -65,8 +117,8 @@ struct SerialMessage {
     String message;
 };
 
-const int MAX_SERIAL_MESSAGES = 100; // Store last 100 serial messages
-SerialMessage serialBuffer[MAX_SERIAL_MESSAGES];
+// Dynamic serial buffer (will be allocated based on config)
+SerialMessage* serialBuffer = nullptr;
 int serialIndex = 0;
 int serialCount = 0;
 
@@ -76,8 +128,9 @@ struct SSEClient {
     unsigned long lastPing;
     bool active;
 };
-const int MAX_SSE_CLIENTS = 5;
-SSEClient sseClients[MAX_SSE_CLIENTS];
+
+// Dynamic SSE clients array (will be allocated based on config)
+SSEClient* sseClients = nullptr;
 int sseClientCount = 0;
 
 // HTML webpage with charts
@@ -372,6 +425,7 @@ const char* htmlPage = R"rawliteral(
             <div>A.J. 70490 | L.P. 72810</div>
             <div style="margin-top: 15px;">
                 <button class="btn" onclick="window.open('/serial', '_blank')" style="margin: 5px;">Serial Monitor</button>
+                <button class="btn" onclick="window.open('/config', '_blank')" style="margin: 5px; background-color: #6c757d;">⚙️ Configuration</button>
                 <button class="btn" onclick="exportData('json')" style="margin: 5px;">Export JSON</button>
                 <button class="btn" onclick="exportData('csv')" style="margin: 5px;">Export CSV</button>
                 <button class="btn" onclick="clearAllData()" style="margin: 5px; background-color: #dc3545;">Clear All Data</button>
@@ -832,14 +886,47 @@ void handleNotFound();
 void handleEvents();
 void broadcastSSE(String message);
 void cleanupSSEClients();
+// Configuration functions
+bool loadConfig();
+bool saveConfig();
+void handleConfig();
+void handleConfigUpdate();
+String getConfigPage();
+void initializeBuffers();
+void pauseDataCollection();
+void resumeDataCollection();
 
 void setup() {
     // put your setup code here, to run once:
     Serial.begin(115200);
     delay(2000); // Give time for serial monitor to connect
     
-    logToSerial("Starting ESP32-S3 Weather Station...");
+    Serial.println("Starting ESP32-S3 Weather Station...");
 
+    // Initialize dynamic buffers first with default configuration
+    initializeBuffers();
+    
+    Serial.println("Buffers initialized with defaults");
+
+    // Initialize LittleFS to load configuration
+    if (!initializeStorage()) {
+        logToSerial("Failed to initialize storage system!");
+        logToSerial("Continuing with default configuration...");
+    } else {
+        // Try to load configuration from flash
+        if (!loadConfig()) {
+            logToSerial("No configuration found, using defaults and saving...");
+            saveConfig(); // Save default configuration
+        } else {
+            logToSerial("Configuration loaded successfully!");
+            // Reinitialize buffers with loaded configuration if sizes changed
+            if (config.maxDataPoints != 4320 || config.maxSerialMessages != 100 || config.maxSSEClients != 5) {
+                logToSerial("Reinitializing buffers with new configuration...");
+                initializeBuffers();
+            }
+        }
+    }
+    
     // Initialize I2C with ESP32-S3 available pins
     Wire.begin(21, 20); // SDA = GPIO21, SCL = GPIO20
     logToSerial("I2C initialized on SDA=21, SCL=20");
@@ -896,12 +983,6 @@ void setup() {
 
     logToSerial("BME280 sensor initialized successfully!");
 
-    // Initialize LittleFS for persistent storage
-    if (!initializeStorage()) {
-        logToSerial("Failed to initialize storage system!");
-        logToSerial("Continuing without persistent storage...");
-    }
-
     // Connect to WiFi with retry logic
     if (!connectToWiFi()) {
         logToSerial("Failed to connect to any WiFi network!");
@@ -909,13 +990,7 @@ void setup() {
         // Continue anyway for development/testing
     }
 
-    // Initialize SSE client array
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
-        sseClients[i].active = false;
-        sseClients[i].lastPing = 0;
-    }
-    sseClientCount = 0;
-    logToSerial("SSE client array initialized");
+    // Initialize SSE client array (will be done in initializeBuffers())
 
     // Initialize NTP time
     logToSerial("Setting up NTP time...");
@@ -947,6 +1022,14 @@ void setup() {
     server.on("/export", handleExport);
     server.on("/serial", handleSerialMonitor);
     server.on("/serialdata", handleSerialData);
+    server.on("/config", []() {
+        if (!requireAuth()) return;
+        server.send(200, "text/html", getConfigPage());
+    });
+    server.on("/configupdate", HTTP_POST, []() {
+        if (!requireAuth()) return;
+        handleConfigUpdate();
+    });
     server.on("/cleardata", []() {
         if (!requireAuth()) return;
         handleClearData();
@@ -1009,8 +1092,8 @@ void loop() {
         lastReading = millis();
     }
     
-    // Log data every 2 minutes
-    if (millis() - lastDataLog > DATA_LOG_INTERVAL) {
+    // Log data based on configured interval (only if data collection is enabled)
+    if (config.dataCollectionEnabled && millis() - lastDataLog > config.dataLogInterval) {
         logSensorData();
         lastDataLog = millis();
         
@@ -1443,7 +1526,7 @@ String getMemoryInfo() {
     info += "\"bufferSize\":" + String(bufferSize) + ",";
     info += "\"singleDataSize\":" + String(singleDataSize) + ",";
     info += "\"currentDataPoints\":" + String(dataCount) + ",";
-    info += "\"maxDataPoints\":" + String(MAX_DATA_POINTS) + ",";
+    info += "\"maxDataPoints\":" + String(config.maxDataPoints) + ",";
     info += "\"estimatedMaxPossible\":" + String(maxPossiblePoints) + ",";
     info += "\"memoryUsagePercent\":" + String((float)usedRAM * 100.0 / totalRAM, 1);
     info += "}";
@@ -1465,6 +1548,12 @@ void readSensorData() {
 }
 
 void logSensorData() {
+    // Check if data buffer is allocated
+    if (dataBuffer == nullptr || config.maxDataPoints == 0) {
+        logToSerial("Error: Data buffer not allocated, skipping data logging");
+        return;
+    }
+    
     unsigned long timestamp = getCurrentTimestamp();
     
     // Track the first data point for runtime calculation
@@ -1495,8 +1584,8 @@ void logSensorData() {
     // logToSerial("Pressure: " + String(pressure, 2) + "hPa");
     // logToSerial("Humidity: " + String(humidity, 2) + "%");
     
-    dataIndex = (dataIndex + 1) % MAX_DATA_POINTS;
-    if (dataCount < MAX_DATA_POINTS) {
+    dataIndex = (dataIndex + 1) % config.maxDataPoints;
+    if (dataCount < config.maxDataPoints) {
         dataCount++;
     }
     
@@ -1513,7 +1602,7 @@ void logSensorData() {
         // Save first 3 data points immediately to ensure persistence
         shouldSave = true;
         logToSerial("Saving initial data point immediately...");
-    } else if (unsavedDataCount >= SAVE_BATCH_SIZE) {
+    } else if (unsavedDataCount >= config.saveBatchSize) {
         // Regular batch save
         shouldSave = true;
         logToSerial("Saving data batch to flash storage...");
@@ -1613,18 +1702,18 @@ void handleHistory() {
     
     if (dataCount > 0) {
         int startIndex;
-        if (dataCount < MAX_DATA_POINTS) {
+        if (dataCount < config.maxDataPoints) {
             // Buffer not full yet, start from beginning
             startIndex = max(0, dataCount - pointsToReturn);
         } else {
             // Buffer is full, calculate circular buffer start
-            startIndex = (dataIndex - pointsToReturn + MAX_DATA_POINTS) % MAX_DATA_POINTS;
+            startIndex = (dataIndex - pointsToReturn + config.maxDataPoints) % config.maxDataPoints;
         }
         
         logToSerial("Start index: " + String(startIndex));
         
         for (int i = 0; i < pointsToReturn; i++) {
-            int index = (startIndex + i) % MAX_DATA_POINTS;
+            int index = (startIndex + i) % config.maxDataPoints;
             if (i > 0) json += ",";
             json += "{";
             json += "\"timestamp\":" + String(dataBuffer[index].timestamp) + ",";
@@ -1656,11 +1745,17 @@ void handleNotFound() {
 }
 
 void handleEvents() {
+    // Check if SSE clients buffer is allocated
+    if (sseClients == nullptr || config.maxSSEClients == 0) {
+        server.send(503, "text/plain", "SSE: Service unavailable");
+        return;
+    }
+    
     WiFiClient client = server.client();
     
     // Find an available slot for the new SSE client
     int clientIndex = -1;
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+    for (int i = 0; i < config.maxSSEClients; i++) {
         if (!sseClients[i].active) {
             clientIndex = i;
             break;
@@ -1696,13 +1791,13 @@ void handleEvents() {
 }
 
 void broadcastSSE(String message) {
-    if (sseClientCount == 0) return;
+    if (sseClients == nullptr || sseClientCount == 0 || config.maxSSEClients == 0) return;
     
     String sseMessage = "data: " + message + "\n\n";
     
     // Note: Removed logToSerial call here to prevent infinite recursion
     
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+    for (int i = 0; i < config.maxSSEClients; i++) {
         if (sseClients[i].active) {
             if (sseClients[i].client.connected()) {
                 size_t written = sseClients[i].client.print(sseMessage);
@@ -1726,7 +1821,9 @@ void broadcastSSE(String message) {
 }
 
 void cleanupSSEClients() {
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+    if (sseClients == nullptr || config.maxSSEClients == 0) return;
+    
+    for (int i = 0; i < config.maxSSEClients; i++) {
         if (sseClients[i].active) {
             if (!sseClients[i].client.connected()) {
                 sseClients[i].active = false;
@@ -1799,17 +1896,17 @@ bool saveDataToFlash() {
     // Save metadata
     doc["version"] = "1.0";
     doc["totalPoints"] = dataCount;
-    doc["maxPoints"] = MAX_DATA_POINTS;
+    doc["maxPoints"] = config.maxDataPoints;
     doc["firstDataLog"] = firstDataLog;
     doc["lastUpdate"] = getCurrentTimestamp();
     
     // Add all data points to JSON
     for (int i = 0; i < dataCount; i++) {
         int index;
-        if (dataCount < MAX_DATA_POINTS) {
+        if (dataCount < config.maxDataPoints) {
             index = i; // Linear array, not circular yet
         } else {
-            index = (dataIndex + i) % MAX_DATA_POINTS; // Circular buffer
+            index = (dataIndex + i) % config.maxDataPoints; // Circular buffer
         }
         
         JsonObject dataPoint = dataArray.createNestedObject();
@@ -1865,7 +1962,7 @@ bool loadDataFromFlash() {
     int loadedPoints = 0;
     
     for (JsonObject dataPoint : dataArray) {
-        if (loadedPoints >= MAX_DATA_POINTS) break;
+        if (loadedPoints >= config.maxDataPoints) break;
         
         dataBuffer[loadedPoints].timestamp = dataPoint["timestamp"];
         dataBuffer[loadedPoints].temperature = dataPoint["temperature"];
@@ -1876,7 +1973,7 @@ bool loadDataFromFlash() {
     }
     
     dataCount = loadedPoints;
-    dataIndex = dataCount % MAX_DATA_POINTS;
+    dataIndex = dataCount % config.maxDataPoints;
     
     logToSerial("Loaded " + String(dataCount) + " data points from flash storage");
     if (dataCount > 0) {
@@ -1899,10 +1996,10 @@ void handleExport() {
         
         for (int i = 0; i < dataCount; i++) {
             int index;
-            if (dataCount < MAX_DATA_POINTS) {
+            if (dataCount < config.maxDataPoints) {
                 index = i;
             } else {
-                index = (dataIndex + i) % MAX_DATA_POINTS;
+                index = (dataIndex + i) % config.maxDataPoints;
             }
             
             if (i > 0) server.sendContent(",");
@@ -1932,10 +2029,10 @@ void handleExport() {
         
         for (int i = 0; i < dataCount; i++) {
             int index;
-            if (dataCount < MAX_DATA_POINTS) {
+            if (dataCount < config.maxDataPoints) {
                 index = i;
             } else {
-                index = (dataIndex + i) % MAX_DATA_POINTS;
+                index = (dataIndex + i) % config.maxDataPoints;
             }
             
             String line = String(dataBuffer[index].timestamp) + ",";
@@ -1951,17 +2048,19 @@ void handleExport() {
 }
 
 void logToSerial(String message) {
-    // Store message in circular buffer
-    serialBuffer[serialIndex].timestamp = millis() / 1000; // Use fast millis() for serial logging
-    serialBuffer[serialIndex].message = message;
-    
-    serialIndex = (serialIndex + 1) % MAX_SERIAL_MESSAGES;
-    if (serialCount < MAX_SERIAL_MESSAGES) {
-        serialCount++;
-    }
-    
-    // Also print to actual serial
+    // Always print to actual serial first
     Serial.println(message);
+    
+    // Store message in circular buffer only if buffer is allocated
+    if (serialBuffer != nullptr && config.maxSerialMessages > 0) {
+        serialBuffer[serialIndex].timestamp = millis() / 1000; // Use fast millis() for serial logging
+        serialBuffer[serialIndex].message = message;
+        
+        serialIndex = (serialIndex + 1) % config.maxSerialMessages;
+        if (serialCount < config.maxSerialMessages) {
+            serialCount++;
+        }
+    }
     
     // NO SSE broadcasting here to prevent infinite recursion
 }
@@ -1971,10 +2070,10 @@ void handleSerialData() {
     
     for (int i = 0; i < serialCount; i++) {
         int index;
-        if (serialCount < MAX_SERIAL_MESSAGES) {
+        if (serialCount < config.maxSerialMessages) {
             index = i;
         } else {
-            index = (serialIndex + i) % MAX_SERIAL_MESSAGES;
+            index = (serialIndex + i) % config.maxSerialMessages;
         }
         
         if (i > 0) json += ",";
@@ -2146,7 +2245,7 @@ void handleClearData() {
     firstDataLog = 0;
     
     // Clear the data buffer
-    for (int i = 0; i < MAX_DATA_POINTS; i++) {
+    for (int i = 0; i < config.maxDataPoints; i++) {
         dataBuffer[i].timestamp = 0;
         dataBuffer[i].temperature = 0.0;
         dataBuffer[i].pressure = 0.0;
@@ -2236,4 +2335,639 @@ bool connectToWiFi() {
     
     logToSerial("All WiFi connection attempts failed!");
     return false;
+}
+
+// Configuration management functions
+bool loadConfig() {
+    File configFile = LittleFS.open(CONFIG_FILE, "r");
+    if (!configFile) {
+        logToSerial("Configuration file not found");
+        return false;
+    }
+    
+    size_t size = configFile.size();
+    if (size > 2048) {
+        logToSerial("Configuration file too large");
+        configFile.close();
+        return false;
+    }
+    
+    std::unique_ptr<char[]> buf(new char[size]);
+    configFile.readBytes(buf.get(), size);
+    configFile.close();
+    
+    JsonDocument doc;
+    auto error = deserializeJson(doc, buf.get());
+    if (error) {
+        logToSerial("Failed to parse configuration file: " + String(error.c_str()));
+        return false;
+    }
+    
+    // Load WiFi settings
+    if (doc["wifi"]["ssid"]) strlcpy(config.ssid, doc["wifi"]["ssid"], sizeof(config.ssid));
+    if (doc["wifi"]["password"]) strlcpy(config.password, doc["wifi"]["password"], sizeof(config.password));
+    if (doc["wifi"]["ssid2"]) strlcpy(config.ssid2, doc["wifi"]["ssid2"], sizeof(config.ssid2));
+    if (doc["wifi"]["password2"]) strlcpy(config.password2, doc["wifi"]["password2"], sizeof(config.password2));
+    
+    // Load admin credentials
+    if (doc["admin"]["username"]) strlcpy(config.adminUsername, doc["admin"]["username"], sizeof(config.adminUsername));
+    if (doc["admin"]["password"]) strlcpy(config.adminPassword, doc["admin"]["password"], sizeof(config.adminPassword));
+    
+    // Load NTP settings
+    if (doc["ntp"]["server"]) strlcpy(config.ntpServer, doc["ntp"]["server"], sizeof(config.ntpServer));
+    if (doc["ntp"]["gmtOffset"]) config.gmtOffset_sec = doc["ntp"]["gmtOffset"];
+    if (doc["ntp"]["dstOffset"]) config.daylightOffset_sec = doc["ntp"]["dstOffset"];
+    
+    // Load data collection settings
+    if (doc["data"]["maxPoints"]) config.maxDataPoints = doc["data"]["maxPoints"];
+    if (doc["data"]["logInterval"]) config.dataLogInterval = doc["data"]["logInterval"];
+    if (doc["data"]["batchSize"]) config.saveBatchSize = doc["data"]["batchSize"];
+    if (doc["data"]["enabled"].is<bool>()) config.dataCollectionEnabled = doc["data"]["enabled"];
+    
+    // Load interface settings
+    if (doc["interface"]["maxSerial"]) config.maxSerialMessages = doc["interface"]["maxSerial"];
+    if (doc["interface"]["maxSSE"]) config.maxSSEClients = doc["interface"]["maxSSE"];
+    
+    logToSerial("Configuration loaded successfully");
+    return true;
+}
+
+bool saveConfig() {
+    JsonDocument doc;
+    
+    // WiFi settings
+    doc["wifi"]["ssid"] = config.ssid;
+    doc["wifi"]["password"] = config.password;
+    doc["wifi"]["ssid2"] = config.ssid2;
+    doc["wifi"]["password2"] = config.password2;
+    
+    // Admin credentials
+    doc["admin"]["username"] = config.adminUsername;
+    doc["admin"]["password"] = config.adminPassword;
+    
+    // NTP settings
+    doc["ntp"]["server"] = config.ntpServer;
+    doc["ntp"]["gmtOffset"] = config.gmtOffset_sec;
+    doc["ntp"]["dstOffset"] = config.daylightOffset_sec;
+    
+    // Data collection settings
+    doc["data"]["maxPoints"] = config.maxDataPoints;
+    doc["data"]["logInterval"] = config.dataLogInterval;
+    doc["data"]["batchSize"] = config.saveBatchSize;
+    doc["data"]["enabled"] = config.dataCollectionEnabled;
+    
+    // Interface settings
+    doc["interface"]["maxSerial"] = config.maxSerialMessages;
+    doc["interface"]["maxSSE"] = config.maxSSEClients;
+    
+    File configFile = LittleFS.open(CONFIG_FILE, "w");
+    if (!configFile) {
+        logToSerial("Failed to open config file for writing");
+        return false;
+    }
+    
+    if (serializeJson(doc, configFile) == 0) {
+        logToSerial("Failed to write config file");
+        configFile.close();
+        return false;
+    }
+    
+    configFile.close();
+    logToSerial("Configuration saved successfully");
+    return true;
+}
+
+void initializeBuffers() {
+    // Free existing buffers if they exist
+    if (dataBuffer != nullptr) {
+        delete[] dataBuffer;
+        dataBuffer = nullptr;
+    }
+    if (serialBuffer != nullptr) {
+        delete[] serialBuffer;
+        serialBuffer = nullptr;
+    }
+    if (sseClients != nullptr) {
+        delete[] sseClients;
+        sseClients = nullptr;
+    }
+    
+    // Allocate new buffers based on configuration with error checking
+    Serial.println("Allocating data buffer: " + String(config.maxDataPoints) + " points");
+    dataBuffer = new(std::nothrow) SensorData[config.maxDataPoints];
+    if (dataBuffer == nullptr) {
+        Serial.println("ERROR: Failed to allocate data buffer!");
+        return;
+    }
+    
+    Serial.println("Allocating serial buffer: " + String(config.maxSerialMessages) + " messages");
+    serialBuffer = new(std::nothrow) SerialMessage[config.maxSerialMessages];
+    if (serialBuffer == nullptr) {
+        Serial.println("ERROR: Failed to allocate serial buffer!");
+        delete[] dataBuffer;
+        dataBuffer = nullptr;
+        return;
+    }
+    
+    Serial.println("Allocating SSE buffer: " + String(config.maxSSEClients) + " clients");
+    sseClients = new(std::nothrow) SSEClient[config.maxSSEClients];
+    if (sseClients == nullptr) {
+        Serial.println("ERROR: Failed to allocate SSE buffer!");
+        delete[] dataBuffer;
+        delete[] serialBuffer;
+        dataBuffer = nullptr;
+        serialBuffer = nullptr;
+        return;
+    }
+    
+    // Initialize SSE clients
+    for (int i = 0; i < config.maxSSEClients; i++) {
+        sseClients[i].active = false;
+        sseClients[i].lastPing = 0;
+    }
+    
+    // Reset counters
+    dataIndex = 0;
+    dataCount = 0;
+    serialIndex = 0;
+    serialCount = 0;
+    sseClientCount = 0;
+    
+    logToSerial("Buffers initialized successfully: Data=" + String(config.maxDataPoints) + 
+                ", Serial=" + String(config.maxSerialMessages) + 
+                ", SSE=" + String(config.maxSSEClients));
+}
+
+void pauseDataCollection() {
+    config.dataCollectionEnabled = false;
+    saveConfig();
+    logToSerial("Data collection paused");
+}
+
+void resumeDataCollection() {
+    config.dataCollectionEnabled = true;
+    saveConfig();
+    logToSerial("Data collection resumed");
+}
+
+void handleConfigUpdate() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "text/plain", "Method Not Allowed");
+        return;
+    }
+    
+    // Parse form data
+    String action = server.arg("action");
+    
+    if (action == "pause") {
+        pauseDataCollection();
+        server.send(200, "text/plain", "Data collection paused");
+        return;
+    } else if (action == "resume") {
+        resumeDataCollection();
+        server.send(200, "text/plain", "Data collection resumed");
+        return;
+    } else if (action == "save") {
+        // Verify current password before allowing configuration changes
+        String currentPassword = server.arg("currentPassword");
+        if (currentPassword.isEmpty() || currentPassword != String(config.adminPassword)) {
+            server.send(401, "text/plain", "Invalid current password! Configuration not saved.");
+            logToSerial("Configuration update attempt with invalid password from IP: " + server.client().remoteIP().toString());
+            return;
+        }
+        
+        // Update configuration from form data
+        if (server.hasArg("ssid")) strlcpy(config.ssid, server.arg("ssid").c_str(), sizeof(config.ssid));
+        if (server.hasArg("password")) strlcpy(config.password, server.arg("password").c_str(), sizeof(config.password));
+        if (server.hasArg("ssid2")) strlcpy(config.ssid2, server.arg("ssid2").c_str(), sizeof(config.ssid2));
+        if (server.hasArg("password2")) strlcpy(config.password2, server.arg("password2").c_str(), sizeof(config.password2));
+        
+        if (server.hasArg("adminUsername")) strlcpy(config.adminUsername, server.arg("adminUsername").c_str(), sizeof(config.adminUsername));
+        // Only update admin password if a new one is provided
+        if (server.hasArg("adminPassword") && server.arg("adminPassword").length() > 0) {
+            strlcpy(config.adminPassword, server.arg("adminPassword").c_str(), sizeof(config.adminPassword));
+            logToSerial("Admin password changed successfully");
+        }
+        
+        if (server.hasArg("ntpServer")) strlcpy(config.ntpServer, server.arg("ntpServer").c_str(), sizeof(config.ntpServer));
+        if (server.hasArg("gmtOffset")) config.gmtOffset_sec = server.arg("gmtOffset").toInt();
+        if (server.hasArg("dstOffset")) config.daylightOffset_sec = server.arg("dstOffset").toInt();
+        
+        if (server.hasArg("maxDataPoints")) config.maxDataPoints = server.arg("maxDataPoints").toInt();
+        if (server.hasArg("dataLogInterval")) config.dataLogInterval = server.arg("dataLogInterval").toInt() * 1000; // Convert seconds to milliseconds
+        if (server.hasArg("saveBatchSize")) config.saveBatchSize = server.arg("saveBatchSize").toInt();
+        
+        if (server.hasArg("maxSerialMessages")) config.maxSerialMessages = server.arg("maxSerialMessages").toInt();
+        if (server.hasArg("maxSSEClients")) config.maxSSEClients = server.arg("maxSSEClients").toInt();
+        
+        // Save configuration
+        if (saveConfig()) {
+            // Reinitialize buffers if buffer sizes changed
+            initializeBuffers();
+            server.send(200, "text/plain", "Configuration saved successfully! Some changes may require restart.");
+            logToSerial("Configuration updated via web interface by user: " + String(config.adminUsername));
+        } else {
+            server.send(500, "text/plain", "Failed to save configuration");
+        }
+    } else {
+        server.send(400, "text/plain", "Invalid action");
+    }
+}
+
+String getConfigPage() {
+    String statusBadge = config.dataCollectionEnabled ? 
+        "<span style='background: #28a745; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px;'>🟢 ACTIVE</span>" :
+        "<span style='background: #dc3545; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px;'>🔴 PAUSED</span>";
+    
+    return R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Weather Station Configuration</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #f0f0f0; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
+        h1 { 
+            color: #333; 
+            text-align: center; 
+            margin-bottom: 30px; 
+        }
+        .section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border-left: 4px solid #007bff;
+        }
+        .section h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .form-group {
+            margin: 15px 0;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+        input[type="text"], input[type="password"], input[type="number"], select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        .row {
+            display: flex;
+            gap: 20px;
+        }
+        .row .form-group {
+            flex: 1;
+        }
+        .btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        .btn:hover { background: #0056b3; }
+        .btn.success { background: #28a745; }
+        .btn.success:hover { background: #1e7e34; }
+        .btn.danger { background: #dc3545; }
+        .btn.danger:hover { background: #c82333; }
+        .btn.secondary { background: #6c757d; }
+        .btn.secondary:hover { background: #545b62; }
+        .status-section {
+            text-align: center;
+            padding: 20px;
+            background: #e9ecef;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 20px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .back-link:hover { text-decoration: underline; }
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #b6d4db;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .control-buttons {
+            text-align: center;
+            margin: 20px 0;
+        }
+        .password-field {
+            position: relative;
+        }
+        .password-strength {
+            font-size: 11px;
+            margin-top: 5px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            display: none;
+        }
+        .strength-weak { background: #f8d7da; color: #721c24; }
+        .strength-medium { background: #fff3cd; color: #856404; }
+        .strength-strong { background: #d4edda; color: #155724; }
+        .warning.security {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚙️ Weather Station Configuration</h1>
+        
+        <div class="status-section">
+            <h3>Data Collection Status</h3>
+            <p>Current Status: )rawliteral" + statusBadge + R"rawliteral(</p>
+            <div class="control-buttons">
+                <button class="btn success" onclick="toggleDataCollection('resume')">▶️ Start Collection</button>
+                <button class="btn danger" onclick="toggleDataCollection('pause')">⏸️ Pause Collection</button>
+            </div>
+        </div>
+
+        <form id="configForm" method="POST" action="/configupdate">
+            <input type="hidden" name="action" value="save">
+            
+            <div class="section">
+                <h3>📶 WiFi Configuration</h3>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="ssid">Primary WiFi SSID:</label>
+                        <input type="text" id="ssid" name="ssid" value=")rawliteral" + String(config.ssid) + R"rawliteral(" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Primary WiFi Password:</label>
+                        <input type="password" id="password" name="password" value=")rawliteral" + String(config.password) + R"rawliteral(">
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="ssid2">Secondary WiFi SSID:</label>
+                        <input type="text" id="ssid2" name="ssid2" value=")rawliteral" + String(config.ssid2) + R"rawliteral(">
+                    </div>
+                    <div class="form-group">
+                        <label for="password2">Secondary WiFi Password:</label>
+                        <input type="password" id="password2" name="password2" value=")rawliteral" + String(config.password2) + R"rawliteral(">
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>👤 Admin Credentials</h3>
+                <div class="warning security">
+                    🔒 <strong>Security Note:</strong> Changing admin credentials requires current password verification.
+                </div>
+                <div class="form-group">
+                    <label for="currentPassword">Current Admin Password (required for changes):</label>
+                    <input type="password" id="currentPassword" name="currentPassword" placeholder="Enter current password to save changes">
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="adminUsername">New Admin Username:</label>
+                        <input type="text" id="adminUsername" name="adminUsername" value=")rawliteral" + String(config.adminUsername) + R"rawliteral(" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="adminPassword">New Admin Password:</label>
+                        <div class="password-field">
+                            <input type="password" id="adminPassword" name="adminPassword" placeholder="Leave blank to keep current password" onkeyup="checkPasswordStrength()">
+                            <div id="passwordStrength" class="password-strength"></div>
+                        </div>
+                        <small>Leave empty to keep current password unchanged</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>🕐 Time Configuration</h3>
+                <div class="form-group">
+                    <label for="ntpServer">NTP Server:</label>
+                    <input type="text" id="ntpServer" name="ntpServer" value=")rawliteral" + String(config.ntpServer) + R"rawliteral(" required>
+                </div>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="gmtOffset">GMT Offset (seconds):</label>
+                        <input type="number" id="gmtOffset" name="gmtOffset" value=")rawliteral" + String(config.gmtOffset_sec) + R"rawliteral(" required>
+                        <small>Example: 3600 for GMT+1, -18000 for GMT-5</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="dstOffset">Daylight Saving Offset (seconds):</label>
+                        <input type="number" id="dstOffset" name="dstOffset" value=")rawliteral" + String(config.daylightOffset_sec) + R"rawliteral(" required>
+                        <small>Usually 3600 (1 hour) or 0 if no DST</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>📊 Data Collection Settings</h3>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="maxDataPoints">Max Data Points:</label>
+                        <input type="number" id="maxDataPoints" name="maxDataPoints" value=")rawliteral" + String(config.maxDataPoints) + R"rawliteral(" min="100" max="10000" required>
+                        <small>Recommended: 4320 for 30 days at 10-min intervals</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="dataLogInterval">Data Log Interval (seconds):</label>
+                        <input type="number" id="dataLogInterval" name="dataLogInterval" value=")rawliteral" + String(config.dataLogInterval / 1000) + R"rawliteral(" min="60" max="3600" required>
+                        <small>How often to save sensor readings</small>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="saveBatchSize">Save Batch Size:</label>
+                    <input type="number" id="saveBatchSize" name="saveBatchSize" value=")rawliteral" + String(config.saveBatchSize) + R"rawliteral(" min="1" max="50" required>
+                    <small>Save to flash after this many new data points</small>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>🖥️ Interface Settings</h3>
+                <div class="row">
+                    <div class="form-group">
+                        <label for="maxSerialMessages">Max Serial Messages:</label>
+                        <input type="number" id="maxSerialMessages" name="maxSerialMessages" value=")rawliteral" + String(config.maxSerialMessages) + R"rawliteral(" min="50" max="500" required>
+                        <small>Number of serial monitor messages to keep</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="maxSSEClients">Max SSE Clients:</label>
+                        <input type="number" id="maxSSEClients" name="maxSSEClients" value=")rawliteral" + String(config.maxSSEClients) + R"rawliteral(" min="1" max="20" required>
+                        <small>Maximum concurrent real-time web connections</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="warning">
+                ⚠️ <strong>Important:</strong> Changing buffer sizes (Max Data Points, Serial Messages, SSE Clients) 
+                will reinitialize memory and may clear current data. Other changes take effect immediately.
+            </div>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <button type="submit" class="btn success">💾 Save Configuration</button>
+                <button type="button" class="btn secondary" onclick="window.location.reload()">🔄 Reset Form</button>
+            </div>
+        </form>
+
+        <div class="info">
+            <strong>Current Memory Usage:</strong><br>
+            <span id="memoryInfo">Loading...</span>
+        </div>
+
+        <a href="/" class="back-link">← Back to Weather Station</a>
+    </div>
+
+    <script>
+        // Load memory information
+        fetch('/memory')
+            .then(response => response.json())
+            .then(data => {
+                const memInfo = `RAM: ${(data.usedRAM / 1024).toFixed(0)} KB used / ${(data.totalRAM / 1024).toFixed(0)} KB total (${data.memoryUsagePercent.toFixed(1)}%)`;
+                document.getElementById('memoryInfo').textContent = memInfo;
+            })
+            .catch(error => {
+                document.getElementById('memoryInfo').textContent = 'Unable to load memory info';
+            });
+
+        // Handle data collection control
+        function toggleDataCollection(action) {
+            const formData = new FormData();
+            formData.append('action', action);
+            
+            fetch('/configupdate', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+                window.location.reload();
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+        }
+
+        // Password strength checker
+        function checkPasswordStrength() {
+            const password = document.getElementById('adminPassword').value;
+            const strengthDiv = document.getElementById('passwordStrength');
+            
+            if (password.length === 0) {
+                strengthDiv.style.display = 'none';
+                return;
+            }
+            
+            let strength = 0;
+            let feedback = '';
+            
+            // Length check
+            if (password.length >= 8) strength++;
+            if (password.length >= 12) strength++;
+            
+            // Character variety checks
+            if (/[a-z]/.test(password)) strength++;
+            if (/[A-Z]/.test(password)) strength++;
+            if (/[0-9]/.test(password)) strength++;
+            if (/[^A-Za-z0-9]/.test(password)) strength++;
+            
+            strengthDiv.style.display = 'block';
+            
+            if (strength < 3) {
+                strengthDiv.className = 'password-strength strength-weak';
+                feedback = '⚠️ Weak password (use 8+ chars, mix case, numbers, symbols)';
+            } else if (strength < 5) {
+                strengthDiv.className = 'password-strength strength-medium';
+                feedback = '⚡ Medium password (consider adding more variety)';
+            } else {
+                strengthDiv.className = 'password-strength strength-strong';
+                feedback = '✅ Strong password';
+            }
+            
+            strengthDiv.textContent = feedback;
+        }
+
+        // Handle form submission
+        document.getElementById('configForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            // Check if current password is provided
+            const currentPassword = document.getElementById('currentPassword').value;
+            if (!currentPassword) {
+                alert('❌ Current admin password is required to save configuration changes!');
+                document.getElementById('currentPassword').focus();
+                return;
+            }
+            
+            if (!confirm('Save configuration changes? Some changes may require a restart to take full effect.')) {
+                return;
+            }
+            
+            const formData = new FormData(this);
+            
+            fetch('/configupdate', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (response.status === 401) {
+                    throw new Error('Invalid current password! Please check your credentials.');
+                }
+                return response.text();
+            })
+            .then(result => {
+                if (result.includes('successfully')) {
+                    alert('✅ ' + result);
+                    // Clear the current password field for security
+                    document.getElementById('currentPassword').value = '';
+                    document.getElementById('adminPassword').value = '';
+                    // Optionally reload the page to show updated values
+                    setTimeout(() => window.location.reload(), 1000);
+                } else {
+                    alert('⚠️ ' + result);
+                }
+            })
+            .catch(error => {
+                alert('❌ Error: ' + error.message);
+            });
+        });
+    </script>
+</body>
+</html>
+)rawliteral";
 }
