@@ -6,6 +6,8 @@
 #include <time.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
+#include <Update.h>
 
 // Primary WiFi credentials
 const char* ssid = "UPC6628674";
@@ -14,6 +16,10 @@ const char* password = "Ar6jxnrurxhe";
 // Secondary WiFi credentials (to be set later)
 const char* ssid2 = "5GTowerTest";
 const char* password2 = "stopcham";
+
+// Admin credentials for protected endpoints
+const char* adminUsername = "admin";
+const char* adminPassword = "weather2025!"; // Change this to your preferred password
 
 // NTP Configuration
 const char* ntpServer = "pool.ntp.org";
@@ -750,15 +756,40 @@ const char* htmlPage = R"rawliteral(
         function clearAllData() {
             if (confirm('⚠️ WARNING: This will permanently delete ALL stored weather data!\\n\\nAre you sure you want to continue?')) {
                 if (confirm('This action cannot be undone. Delete all data?')) {
-                    fetch('/cleardata', { method: 'POST' })
-                        .then(response => response.text())
+                    // Prompt for admin credentials
+                    const username = prompt('Admin Username:');
+                    const password = prompt('Admin Password:');
+                    
+                    if (!username || !password) {
+                        alert('❌ Authentication required!');
+                        return;
+                    }
+                    
+                    // Create authorization header
+                    const credentials = btoa(username + ':' + password);
+                    
+                    fetch('/cleardata', { 
+                        method: 'POST',
+                        headers: {
+                            'Authorization': 'Basic ' + credentials
+                        }
+                    })
+                        .then(response => {
+                            if (response.status === 401) {
+                                alert('❌ Invalid credentials!');
+                                return Promise.reject('Unauthorized');
+                            }
+                            return response.text();
+                        })
                         .then(result => {
                             alert('✅ All data has been cleared successfully!');
                             // Refresh the page to show empty charts
                             location.reload();
                         })
                         .catch(error => {
-                            alert('❌ Error clearing data: ' + error);
+                            if (error !== 'Unauthorized') {
+                                alert('❌ Error clearing data: ' + error);
+                            }
                         });
                 }
             }
@@ -785,6 +816,10 @@ bool saveDataToFlash();
 bool loadDataFromFlash();
 void handleExport();
 bool connectToWiFi();
+bool requireAuth();
+void setupOTA();
+void handleOTAUpdate();
+String getOTAUpdatePage();
 unsigned long getCurrentTimestamp();
 String getMemoryInfo();
 void readSensorData();
@@ -912,13 +947,32 @@ void setup() {
     server.on("/export", handleExport);
     server.on("/serial", handleSerialMonitor);
     server.on("/serialdata", handleSerialData);
-    server.on("/cleardata", handleClearData);
+    server.on("/cleardata", []() {
+        if (!requireAuth()) return;
+        handleClearData();
+    });
+    server.on("/update", HTTP_GET, []() {
+        if (!requireAuth()) return;
+        server.send(200, "text/html", getOTAUpdatePage());
+    });
+    server.on("/update", HTTP_POST, []() {
+        if (!requireAuth()) return;
+        server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
+        ESP.restart();
+    }, []() {
+        if (!requireAuth()) return;
+        handleOTAUpdate();
+    });
     server.onNotFound(handleNotFound);
+
+    // Setup OTA
+    setupOTA();
 
     // Start server
     server.begin();
     logToSerial("HTTP server started");
     logToSerial("Access the weather station at: http://" + WiFi.localIP().toString());
+    logToSerial("OTA update available at: http://" + WiFi.localIP().toString() + "/update");
     
     // Take initial sensor reading and log data immediately for testing
     logToSerial("Taking initial sensor reading...");
@@ -931,6 +985,7 @@ void setup() {
 
 void loop() {
     // put your main code here, to run repeatedly:
+    ArduinoOTA.handle();
     server.handleClient();
 
     // Read sensor data every 5 seconds
@@ -969,6 +1024,297 @@ void loop() {
 }
 
 // put function definitions here:
+bool requireAuth() {
+    if (!server.authenticate(adminUsername, adminPassword)) {
+        server.requestAuthentication(DIGEST_AUTH, "Weather Station Admin", "Authentication Required");
+        return false;
+    }
+    return true;
+}
+
+void setupOTA() {
+    ArduinoOTA.setHostname("ESP32-WeatherStation");
+    ArduinoOTA.setPassword("weather123"); // Change this to your preferred password
+    
+    ArduinoOTA.onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH) {
+            type = "sketch";
+        } else { // U_SPIFFS
+            type = "filesystem";
+        }
+        logToSerial("Start updating " + type);
+    });
+    
+    ArduinoOTA.onEnd([]() {
+        logToSerial("OTA Update completed successfully!");
+    });
+    
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+        static unsigned long lastLog = 0;
+        unsigned long now = millis();
+        if (now - lastLog > 1000) { // Log every second
+            String progressMsg = "Progress: " + String((progress / (total / 100))) + "%";
+            logToSerial(progressMsg);
+            lastLog = now;
+        }
+    });
+    
+    ArduinoOTA.onError([](ota_error_t error) {
+        String errorMsg = "Error[" + String(error) + "]: ";
+        if (error == OTA_AUTH_ERROR) errorMsg += "Auth Failed";
+        else if (error == OTA_BEGIN_ERROR) errorMsg += "Begin Failed";
+        else if (error == OTA_CONNECT_ERROR) errorMsg += "Connect Failed";
+        else if (error == OTA_RECEIVE_ERROR) errorMsg += "Receive Failed";
+        else if (error == OTA_END_ERROR) errorMsg += "End Failed";
+        logToSerial(errorMsg);
+    });
+    
+    ArduinoOTA.begin();
+    logToSerial("OTA Ready");
+}
+
+void handleOTAUpdate() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        logToSerial("Update Start: " + upload.filename);
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            logToSerial("Update Success: " + String(upload.totalSize) + " bytes");
+        } else {
+            Update.printError(Serial);
+        }
+    }
+}
+
+String getOTAUpdatePage() {
+    return R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 Weather Station - Firmware Update</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #f0f0f0; 
+        }
+        .container { 
+            max-width: 600px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+        }
+        h1 { 
+            color: #333; 
+            text-align: center; 
+            margin-bottom: 30px; 
+        }
+        .upload-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 2px dashed #007bff;
+            border-radius: 5px;
+            background: white;
+        }
+        .upload-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            margin-top: 10px;
+        }
+        .upload-btn:hover { background: #0056b3; }
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .info {
+            background: #d1ecf1;
+            border: 1px solid #b6d4db;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+        .progress {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+            display: none;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #28a745;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .back-link {
+            display: inline-block;
+            margin-top: 20px;
+            color: #007bff;
+            text-decoration: none;
+        }
+        .back-link:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 Firmware Update</h1>
+        
+        <div class="info">
+            <strong>Current Device:</strong> ESP32-S3 Weather Station<br>
+            <strong>IP Address:</strong> <span id="deviceIP"></span><br>
+            <strong>Free Space:</strong> <span id="freeSpace"></span>
+        </div>
+        
+        <div class="warning">
+            ⚠️ <strong>Warning:</strong> Do not power off the device during firmware update. 
+            The process may take 1-2 minutes to complete.
+        </div>
+        
+        <div class="upload-section">
+            <h3>Select Firmware File (.bin)</h3>
+            <form method="POST" action="/update" enctype="multipart/form-data" id="uploadForm">
+                <input type="file" name="update" accept=".bin" required id="fileInput">
+                <div class="progress" id="progressContainer">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+                <div id="progressText" style="text-align: center; margin: 10px 0; display: none;">
+                    Uploading: 0%
+                </div>
+                <button type="submit" class="upload-btn" id="uploadBtn">
+                    📤 Upload Firmware
+                </button>
+            </form>
+        </div>
+        
+        <div class="info">
+            <strong>Instructions:</strong><br>
+            1. Compile your firmware in PlatformIO<br>
+            2. Locate the .bin file in .pio/build/esp32-s3-devkitc-1/<br>
+            3. Select the firmware.bin file above<br>
+            4. Click "Upload Firmware" and wait for completion<br>
+            5. Device will restart automatically
+        </div>
+        
+        <a href="/" class="back-link">← Back to Weather Station</a>
+    </div>
+
+    <script>
+        // Display device info
+        document.getElementById('deviceIP').textContent = window.location.hostname;
+        
+        // Get free space info
+        fetch('/memory')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('freeSpace').textContent = 
+                    Math.round(data.freeRAM / 1024) + ' KB RAM';
+            })
+            .catch(error => {
+                document.getElementById('freeSpace').textContent = 'Unknown';
+            });
+
+        // Handle form submission with progress
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Please select a firmware file!');
+                return;
+            }
+            
+            if (!file.name.endsWith('.bin')) {
+                alert('Please select a .bin firmware file!');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('update', file);
+            
+            const uploadBtn = document.getElementById('uploadBtn');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '⏳ Uploading...';
+            progressContainer.style.display = 'block';
+            progressText.style.display = 'block';
+            
+            const xhr = new XMLHttpRequest();
+            
+            xhr.upload.addEventListener('progress', function(e) {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    progressBar.style.width = percentComplete + '%';
+                    progressText.textContent = 'Uploading: ' + Math.round(percentComplete) + '%';
+                }
+            });
+            
+            xhr.addEventListener('load', function() {
+                if (xhr.status === 200) {
+                    progressText.textContent = '✅ Upload successful! Device restarting...';
+                    uploadBtn.textContent = '✅ Success';
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 3000);
+                } else {
+                    progressText.textContent = '❌ Upload failed!';
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = '📤 Upload Firmware';
+                }
+            });
+            
+            xhr.addEventListener('error', function() {
+                progressText.textContent = '❌ Upload error!';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '📤 Upload Firmware';
+            });
+            
+            xhr.open('POST', '/update');
+            xhr.send(formData);
+        });
+    </script>
+</body>
+</html>
+)rawliteral";
+}
+
 unsigned long getCurrentTimestamp() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
