@@ -957,8 +957,22 @@ void setup() {
     });
     server.on("/update", HTTP_POST, []() {
         if (!requireAuth()) return;
-        server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
-        ESP.restart();
+        
+        bool updateSuccess = !Update.hasError();
+        String response = updateSuccess ? "OK" : "FAIL";
+        
+        // Send response to browser
+        server.send(200, "text/plain", response);
+        
+        if (updateSuccess) {
+            logToSerial("Firmware update completed successfully! Restarting in 2 seconds...");
+            // Give time for the HTTP response to reach the browser
+            delay(2000);
+            ESP.restart();
+        } else {
+            logToSerial("Firmware update failed!");
+            Update.printError(Serial);
+        }
     }, []() {
         if (!requireAuth()) return;
         handleOTAUpdate();
@@ -1077,20 +1091,43 @@ void setupOTA() {
 void handleOTAUpdate() {
     HTTPUpload& upload = server.upload();
     if (upload.status == UPLOAD_FILE_START) {
-        logToSerial("Update Start: " + upload.filename);
+        logToSerial("=== OTA Update Started ===");
+        logToSerial("Filename: " + upload.filename);
+        logToSerial("Free heap before update: " + String(ESP.getFreeHeap()) + " bytes");
+        
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            logToSerial("❌ Update.begin() failed!");
             Update.printError(Serial);
+        } else {
+            logToSerial("✅ Update.begin() successful");
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        size_t written = Update.write(upload.buf, upload.currentSize);
+        if (written != upload.currentSize) {
+            logToSerial("❌ Update.write() failed! Expected: " + String(upload.currentSize) + ", Written: " + String(written));
             Update.printError(Serial);
+        }
+        // Log progress every 64KB
+        static size_t lastLoggedBytes = 0;
+        if (upload.totalSize - lastLoggedBytes >= 65536) {
+            logToSerial("📝 Upload progress: " + String(upload.totalSize) + " bytes");
+            lastLoggedBytes = upload.totalSize;
         }
     } else if (upload.status == UPLOAD_FILE_END) {
         if (Update.end(true)) {
-            logToSerial("Update Success: " + String(upload.totalSize) + " bytes");
+            logToSerial("✅ Update Success!");
+            logToSerial("Total bytes written: " + String(upload.totalSize));
+            logToSerial("MD5 verification: " + String(Update.hasError() ? "FAILED" : "PASSED"));
+            logToSerial("=== OTA Update Completed ===");
         } else {
+            logToSerial("❌ Update.end() failed!");
             Update.printError(Serial);
+            logToSerial("=== OTA Update Failed ===");
         }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        logToSerial("❌ Upload aborted!");
+        Update.end();
+        logToSerial("=== OTA Update Aborted ===");
     }
 }
 
@@ -1288,27 +1325,85 @@ String getOTAUpdatePage() {
             
             xhr.addEventListener('load', function() {
                 if (xhr.status === 200) {
-                    progressText.textContent = '✅ Upload successful! Device restarting...';
-                    uploadBtn.textContent = '✅ Success';
-                    setTimeout(() => {
-                        window.location.href = '/';
-                    }, 3000);
+                    const response = xhr.responseText;
+                    if (response === 'OK') {
+                        progressText.textContent = '✅ Upload successful! Device restarting...';
+                        uploadBtn.textContent = '✅ Success';
+                        
+                        // Wait for device restart and try to reconnect
+                        setTimeout(() => {
+                            progressText.textContent = '🔄 Waiting for device to restart...';
+                            checkDeviceAvailable();
+                        }, 3000);
+                    } else {
+                        progressText.textContent = '❌ Upload failed: ' + response;
+                        uploadBtn.disabled = false;
+                        uploadBtn.textContent = '📤 Upload Firmware';
+                    }
                 } else {
-                    progressText.textContent = '❌ Upload failed!';
+                    progressText.textContent = '❌ Upload failed! Status: ' + xhr.status;
                     uploadBtn.disabled = false;
                     uploadBtn.textContent = '📤 Upload Firmware';
                 }
             });
             
             xhr.addEventListener('error', function() {
-                progressText.textContent = '❌ Upload error!';
-                uploadBtn.disabled = false;
-                uploadBtn.textContent = '📤 Upload Firmware';
+                // Network error could mean device is restarting after successful update
+                progressText.textContent = '🔄 Connection lost - device may be restarting...';
+                setTimeout(() => {
+                    checkDeviceAvailable();
+                }, 5000);
+            });
+            
+            xhr.addEventListener('timeout', function() {
+                // Timeout could mean device is restarting after successful update
+                progressText.textContent = '� Request timeout - device may be restarting...';
+                setTimeout(() => {
+                    checkDeviceAvailable();
+                }, 5000);
+            });
+            
+            // Set timeout for the request
+            xhr.timeout = 60000; // 60 seconds
             });
             
             xhr.open('POST', '/update');
             xhr.send(formData);
         });
+        
+        // Function to check if device is available after restart
+        function checkDeviceAvailable() {
+            let attempts = 0;
+            const maxAttempts = 20; // Try for about 2 minutes
+            
+            function tryConnect() {
+                attempts++;
+                progressText.textContent = `🔄 Checking device availability... (${attempts}/${maxAttempts})`;
+                
+                fetch('/data', { method: 'GET', timeout: 3000 })
+                    .then(response => {
+                        if (response.ok) {
+                            progressText.textContent = '✅ Device is back online! Redirecting...';
+                            setTimeout(() => {
+                                window.location.href = '/';
+                            }, 2000);
+                        } else {
+                            throw new Error('Device not ready');
+                        }
+                    })
+                    .catch(error => {
+                        if (attempts < maxAttempts) {
+                            setTimeout(tryConnect, 6000); // Wait 6 seconds between attempts
+                        } else {
+                            progressText.textContent = '⚠️ Device restart timeout. Please refresh page manually.';
+                            uploadBtn.disabled = false;
+                            uploadBtn.textContent = '📤 Upload Firmware';
+                        }
+                    });
+            }
+            
+            tryConnect();
+        }
     </script>
 </body>
 </html>
