@@ -50,7 +50,7 @@ const unsigned long DATA_LOG_INTERVAL = 600000/20; // Log every 10 minutes
 // Persistent storage configuration
 const char* DATA_FILE = "/sensor_data.json";
 const char* CONFIG_FILE = "/config.json";
-const int SAVE_BATCH_SIZE = 10; // Save to flash every 10 new data points
+const int SAVE_BATCH_SIZE = 5; // Save to flash every 5 new data points
 int unsavedDataCount = 0;
 
 // Server-Sent Events
@@ -919,6 +919,17 @@ void loop() {
         cleanupSSEClients();
         lastSSECleanup = millis();
     }
+    
+    // Periodic auto-save every 5 minutes (in case of unexpected restart)
+    static unsigned long lastAutoSave = 0;
+    if (millis() - lastAutoSave > 300000 && unsavedDataCount > 0) { // 5 minutes
+        Serial.println("Periodic auto-save triggered (unsaved: " + String(unsavedDataCount) + " points)");
+        if (saveDataToFlash()) {
+            Serial.println("Periodic auto-save successful!");
+            unsavedDataCount = 0;
+        }
+        lastAutoSave = millis();
+    }
 }
 
 // put function definitions here:
@@ -1012,14 +1023,24 @@ void logSensorData() {
     // Increment unsaved data counter
     unsavedDataCount++;
     
-    // Save to flash storage periodically (batch saves for efficiency)
-    if (unsavedDataCount >= SAVE_BATCH_SIZE) {
+    // Save immediately for first few data points, then use batch saves
+    bool shouldSave = false;
+    if (dataCount <= 3) {
+        // Save first 3 data points immediately to ensure persistence
+        shouldSave = true;
+        Serial.println("Saving initial data point immediately...");
+    } else if (unsavedDataCount >= SAVE_BATCH_SIZE) {
+        // Regular batch save
+        shouldSave = true;
         Serial.println("Saving data batch to flash storage...");
+    }
+    
+    if (shouldSave) {
         if (saveDataToFlash()) {
-            Serial.println("Data batch saved to flash successfully!");
+            Serial.println("Data saved to flash successfully! (" + String(dataCount) + " total points)");
             unsavedDataCount = 0;
         } else {
-            Serial.println("Failed to save data batch to flash!");
+            Serial.println("Failed to save data to flash!");
         }
     }
     
@@ -1276,11 +1297,17 @@ bool initializeStorage() {
 }
 
 bool saveDataToFlash() {
-    File dataFile = LittleFS.open(DATA_FILE, "w");
+    // Ensure directory exists (though LittleFS doesn't really have directories)
+    Serial.println("Attempting to save " + String(dataCount) + " data points to flash...");
+    
+    File dataFile = LittleFS.open(DATA_FILE, "w", true); // true = create if not exists
     if (!dataFile) {
         Serial.println("Failed to open data file for writing!");
+        Serial.println("LittleFS info: Total=" + String(LittleFS.totalBytes()) + ", Used=" + String(LittleFS.usedBytes()));
         return false;
     }
+    
+    Serial.println("Data file opened successfully for writing");
     
     // Create JSON document
     DynamicJsonDocument doc(32768); // 32KB for JSON document
@@ -1466,7 +1493,7 @@ bool connectToWiFi() {
         Serial.println();
         Serial.println("Primary WiFi connection failed on attempt " + String(attempt));
         WiFi.disconnect();
-        delay(2000); // Wait 2 seconds before next attempt
+        delay(500); // Wait 2 seconds before next attempt
     }
     
     // If primary WiFi failed, try secondary WiFi (if configured)
@@ -1477,7 +1504,7 @@ bool connectToWiFi() {
             WiFi.begin(ssid2, password2);
             
             // Wait up to 20 seconds for connection
-            int timeout = 40; // 40 * 500ms = 20 seconds
+            int timeout = 10; // 40 * 500ms = 20 seconds
             while (WiFi.status() != WL_CONNECTED && timeout > 0) {
                 delay(500);
                 Serial.print(".");
@@ -1495,7 +1522,7 @@ bool connectToWiFi() {
             Serial.println();
             Serial.println("Secondary WiFi connection failed on attempt " + String(attempt));
             WiFi.disconnect();
-            delay(2000); // Wait 2 seconds before next attempt
+            delay(500); // Wait 2 seconds before next attempt
         }
     } else {
         Serial.println("No secondary WiFi configured. Please provide secondary WiFi credentials if needed.");
