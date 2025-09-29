@@ -45,7 +45,7 @@ int dataIndex = 0;
 int dataCount = 0;
 unsigned long lastDataLog = 0;
 unsigned long firstDataLog = 0; // Track first data point timestamp for runtime calculation
-const unsigned long DATA_LOG_INTERVAL = 600000/20; // Log every 10 minutes
+const unsigned long DATA_LOG_INTERVAL = 600000; // Log every 10 minutes
 
 // Persistent storage configuration
 const char* DATA_FILE = "/sensor_data.json";
@@ -368,6 +368,7 @@ const char* htmlPage = R"rawliteral(
                 <button class="btn" onclick="window.open('/serial', '_blank')" style="margin: 5px;">Serial Monitor</button>
                 <button class="btn" onclick="exportData('json')" style="margin: 5px;">Export JSON</button>
                 <button class="btn" onclick="exportData('csv')" style="margin: 5px;">Export CSV</button>
+                <button class="btn" onclick="clearAllData()" style="margin: 5px; background-color: #dc3545;">Clear All Data</button>
             </div>
         </div>
     </div>
@@ -745,6 +746,24 @@ const char* htmlPage = R"rawliteral(
             console.log('Exporting data in ' + format.toUpperCase() + ' format');
         }
         
+        // Clear all data function
+        function clearAllData() {
+            if (confirm('⚠️ WARNING: This will permanently delete ALL stored weather data!\\n\\nAre you sure you want to continue?')) {
+                if (confirm('This action cannot be undone. Delete all data?')) {
+                    fetch('/cleardata', { method: 'POST' })
+                        .then(response => response.text())
+                        .then(result => {
+                            alert('✅ All data has been cleared successfully!');
+                            // Refresh the page to show empty charts
+                            location.reload();
+                        })
+                        .catch(error => {
+                            alert('❌ Error clearing data: ' + error);
+                        });
+                }
+            }
+        }
+        
         // Clean up on page unload
         window.addEventListener('beforeunload', function() {
             if (eventSource) {
@@ -760,6 +779,7 @@ const char* htmlPage = R"rawliteral(
 void logToSerial(String message);
 void handleSerialMonitor();
 void handleSerialData();
+void handleClearData();
 bool initializeStorage();
 bool saveDataToFlash();
 bool loadDataFromFlash();
@@ -892,6 +912,7 @@ void setup() {
     server.on("/export", handleExport);
     server.on("/serial", handleSerialMonitor);
     server.on("/serialdata", handleSerialData);
+    server.on("/cleardata", handleClearData);
     server.onNotFound(handleNotFound);
 
     // Start server
@@ -1666,6 +1687,51 @@ void handleSerialMonitor() {
 )rawliteral";
     
     server.send(200, "text/html", html);
+}
+
+void handleClearData() {
+    // Check if this is a POST request
+    if (server.method() != HTTP_POST) {
+        server.send(405, "text/plain", "Method Not Allowed - Use POST");
+        return;
+    }
+    
+    logToSerial("⚠️ CLEARING ALL DATA - User requested data wipe");
+    
+    // Reset all data counters and indices
+    dataCount = 0;
+    dataIndex = 0;
+    unsavedDataCount = 0;
+    firstDataLog = 0;
+    
+    // Clear the data buffer
+    for (int i = 0; i < MAX_DATA_POINTS; i++) {
+        dataBuffer[i].timestamp = 0;
+        dataBuffer[i].temperature = 0.0;
+        dataBuffer[i].pressure = 0.0;
+        dataBuffer[i].humidity = 0.0;
+    }
+    
+    // Clear persistent storage
+    bool storageCleared = false;
+    if (LittleFS.remove(DATA_FILE)) {
+        logToSerial("✅ Persistent storage file deleted successfully");
+        storageCleared = true;
+    } else {
+        logToSerial("⚠️ No persistent storage file found or failed to delete");
+        storageCleared = true; // Not an error if file doesn't exist
+    }
+    
+    if (storageCleared) {
+        logToSerial("✅ All weather data cleared successfully!");
+        server.send(200, "text/plain", "SUCCESS: All data cleared successfully!");
+        
+        // Broadcast data clear event to SSE clients
+        broadcastSSE("{\"type\":\"dataCleared\",\"message\":\"All data has been cleared\"}");
+    } else {
+        logToSerial("❌ Failed to clear some data");
+        server.send(500, "text/plain", "ERROR: Failed to clear all data");
+    }
 }
 
 bool connectToWiFi() {
