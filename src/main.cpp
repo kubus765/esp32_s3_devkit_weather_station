@@ -959,7 +959,7 @@ const char* htmlPage = R"rawliteral(
             
             // CHANGE THIS: Replace 'XXX' with your ESP32-CAM's last IP octet
             // For example: if camera is at 192.168.0.145, use '145'
-            return baseIP + 'XXX'; // ← UPDATE THIS WITH YOUR CAMERA IP
+            return baseIP + '107'; // ← UPDATE THIS WITH YOUR CAMERA IP
         }
         
         function showCameraModal() {
