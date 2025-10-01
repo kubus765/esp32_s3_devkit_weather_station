@@ -317,6 +317,70 @@ const char* htmlPage = R"rawliteral(
             color: #666;
             margin-top: 5px;
         }
+        
+        /* Camera preview styles */
+        .camera-preview {
+            text-align: center;
+        }
+        .camera-preview h3 {
+            margin-top: 0;
+            color: #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .camera-frame {
+            position: relative;
+            display: inline-block;
+            border: 3px solid #007bff;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #f0f0f0;
+            margin: 10px 0;
+        }
+        .camera-image {
+            width: 100%;
+            max-width: 320px;
+            height: auto;
+            display: block;
+            transition: transform 0.3s ease;
+        }
+        .camera-image:hover {
+            transform: scale(1.02);
+            cursor: pointer;
+        }
+        .camera-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 123, 255, 0.9);
+            color: white;
+            padding: 8px;
+            font-size: 12px;
+            transition: opacity 0.3s ease;
+        }
+        .camera-frame:hover .camera-overlay {
+            opacity: 0.7;
+        }
+        .camera-status {
+            display: inline-block;
+            padding: 4px 12px;
+            background: #28a745;
+            color: white;
+            border-radius: 12px;
+            font-size: 11px;
+            margin: 5px 0;
+        }
+        .camera-offline {
+            background: #dc3545;
+        }
+        @media (max-width: 768px) {
+            .camera-image {
+                max-width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
@@ -393,6 +457,23 @@ const char* htmlPage = R"rawliteral(
                         <div class="stat-value" id="ram-free">--</div>
                         <div class="stat-label">Free RAM (KB)</div>
                     </div>
+                </div>
+            </div>
+            
+            <div class="card camera-preview">
+                <h3>🏠 Window View</h3>
+                <div class="camera-status" id="camera-status">📹 Live</div>
+                <div class="camera-frame" onclick="openCameraFeed()">
+                    <img id="camera-preview" class="camera-image" 
+                         src="http://ESP32CAM_IP/capture" 
+                         alt="Camera feed unavailable"
+                         onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgZmlsbD0iI2Y4ZjlmYSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMTEwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPjxhdGVyYSBPZmZsaW5lPC90ZXh0PgogIDx0ZXh0IHg9IjE2MCIgeT0iMTMwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNsaWNrIHRvIGNoZWNrIGNhbWVyYTwvdGV4dD4KICA8L3N2Zz4K'; document.getElementById('camera-status').textContent='📴 Offline'; document.getElementById('camera-status').className='camera-status camera-offline';">
+                    <div class="camera-overlay">
+                        Click to open full camera view
+                    </div>
+                </div>
+                <div style="font-size: 12px; color: #666; margin-top: 10px;">
+                    Live view of outdoor conditions
                 </div>
             </div>
         </div>
@@ -853,6 +934,83 @@ const char* htmlPage = R"rawliteral(
         window.addEventListener('beforeunload', function() {
             if (eventSource) {
                 eventSource.close();
+            }
+        });
+        
+        // Camera functions
+        function openCameraFeed() {
+            // Try to detect the ESP32-CAM IP automatically or use default
+            const cameraIP = detectCameraIP() || 'ESP32CAM_IP';
+            if (cameraIP !== 'ESP32CAM_IP') {
+                window.open('http://' + cameraIP, '_blank');
+            } else {
+                // If camera IP not detected, show modal with manual options
+                showCameraModal();
+            }
+        }
+        
+        function detectCameraIP() {
+            // Try common ESP32-CAM IPs on the same network
+            const currentIP = window.location.hostname;
+            const baseIP = currentIP.substring(0, currentIP.lastIndexOf('.') + 1);
+            
+            // Common ESP32-CAM IPs to try: .130, .131, .132, .200, .201
+            const commonIPs = ['130', '131', '132', '200', '201'];
+            
+            // CHANGE THIS: Replace 'XXX' with your ESP32-CAM's last IP octet
+            // For example: if camera is at 192.168.0.145, use '145'
+            return baseIP + 'XXX'; // ← UPDATE THIS WITH YOUR CAMERA IP
+        }
+        
+        function showCameraModal() {
+            const currentIP = window.location.hostname;
+            const baseIP = currentIP.substring(0, currentIP.lastIndexOf('.') + 1);
+            
+            const modal = `
+                <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;" onclick="this.remove()">
+                    <div style="background: white; padding: 30px; border-radius: 15px; max-width: 400px; text-align: center;" onclick="event.stopPropagation()">
+                        <h3>📷 Camera Options</h3>
+                        <p>ESP32-CAM not found at expected location.</p>
+                        <div style="margin: 20px 0;">
+                            <button onclick="window.open('http://${baseIP}130', '_blank')" style="margin: 5px; padding: 10px 15px; border: none; background: #007bff; color: white; border-radius: 5px; cursor: pointer;">Try ${baseIP}130</button><br>
+                            <button onclick="window.open('http://${baseIP}131', '_blank')" style="margin: 5px; padding: 10px 15px; border: none; background: #007bff; color: white; border-radius: 5px; cursor: pointer;">Try ${baseIP}131</button><br>
+                            <button onclick="window.open('http://${baseIP}132', '_blank')" style="margin: 5px; padding: 10px 15px; border: none; background: #007bff; color: white; border-radius: 5px; cursor: pointer;">Try ${baseIP}132</button><br>
+                        </div>
+                        <button onclick="this.parentElement.parentElement.remove()" style="margin-top: 15px; padding: 10px 20px; border: 1px solid #ccc; background: #f8f9fa; border-radius: 5px; cursor: pointer;">Close</button>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modal);
+        }
+        
+        function refreshCameraPreview() {
+            const img = document.getElementById('camera-preview');
+            const currentSrc = img.src;
+            img.src = '';
+            setTimeout(() => {
+                img.src = currentSrc + '?' + Date.now();
+            }, 100);
+        }
+        
+        // Auto-refresh camera preview every 30 seconds
+        setInterval(refreshCameraPreview, 30000);
+        
+        // Initialize camera preview on page load
+        window.addEventListener('load', function() {
+            // Update camera preview with detected IP
+            const cameraIP = detectCameraIP();
+            if (cameraIP && cameraIP !== 'ESP32CAM_IP') {
+                const img = document.getElementById('camera-preview');
+                img.src = 'http://' + cameraIP + '/capture';
+                img.onerror = function() {
+                    this.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgZmlsbD0iI2Y4ZjlmYSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMTEwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBPZmZsaW5lPC90ZXh0PgogIDx0ZXh0IHg9IjE2MCIgeT0iMTMwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNsaWNrIHRvIGNoZWNrIGNhbWVyYTwvdGV4dD4KICA8L3N2Zz4K';
+                    document.getElementById('camera-status').textContent = '📴 Offline';
+                    document.getElementById('camera-status').className = 'camera-status camera-offline';
+                };
+                img.onload = function() {
+                    document.getElementById('camera-status').textContent = '📹 Live';
+                    document.getElementById('camera-status').className = 'camera-status';
+                };
             }
         });
     </script>
