@@ -67,3 +67,4 @@ ngrok.zip
 
 
 *.exe
+/CameraWebServer

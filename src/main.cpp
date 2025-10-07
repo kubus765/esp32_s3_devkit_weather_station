@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 #include <Wire.h>
 #include <Adafruit_BME280.h>
 #include <time.h>
@@ -25,6 +26,9 @@ struct WeatherConfig {
     char ntpServer[64];
     long gmtOffset_sec;
     int daylightOffset_sec;
+    
+    // Camera settings
+    char cameraIP[16];
     
     // Data collection settings
     int maxDataPoints;
@@ -55,6 +59,9 @@ WeatherConfig config = {
     "pool.ntp.org",
     3600,  // GMT+1
     3600,  // DST offset
+    
+    // Camera defaults
+    "192.168.0.107",
     
     // Data collection defaults
     4320,  // 30 days at 10-minute intervals
@@ -90,6 +97,10 @@ WebServer server(80);
 float temperature = 0.0;
 float pressure = 0.0;
 float humidity = 0.0;
+
+// Camera caching variables
+unsigned long lastCameraUpdate = 0;
+const unsigned long cameraUpdateInterval = 30000; // 30 seconds
 
 // Data logging system
 struct SensorData {
@@ -465,7 +476,7 @@ const char* htmlPage = R"rawliteral(
                 <div class="camera-status" id="camera-status">📹 Live</div>
                 <div class="camera-frame" onclick="openCameraFeed()">
                     <img id="camera-preview" class="camera-image" 
-                         src="http://ESP32CAM_IP/capture" 
+                         src="/camera/capture" 
                          alt="Camera feed unavailable"
                          onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgZmlsbD0iI2Y4ZjlmYSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMTEwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPjxhdGVyYSBPZmZsaW5lPC90ZXh0PgogIDx0ZXh0IHg9IjE2MCIgeT0iMTMwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNsaWNrIHRvIGNoZWNrIGNhbWVyYTwvdGV4dD4KICA8L3N2Zz4K'; document.getElementById('camera-status').textContent='📴 Offline'; document.getElementById('camera-status').className='camera-status camera-offline';">
                     <div class="camera-overlay">
@@ -474,6 +485,9 @@ const char* htmlPage = R"rawliteral(
                 </div>
                 <div style="font-size: 12px; color: #666; margin-top: 10px;">
                     Live view of outdoor conditions
+                    <br>
+                    <button onclick="testCameraManually()" style="margin-top: 5px; padding: 5px 10px; border: 1px solid #ccc; background: #f8f9fa; border-radius: 3px; cursor: pointer; font-size: 11px;">Test Connection</button>
+                    <button onclick="refreshCameraPreview()" style="margin-top: 5px; padding: 5px 10px; border: 1px solid #ccc; background: #f8f9fa; border-radius: 3px; cursor: pointer; font-size: 11px;">Refresh</button>
                 </div>
             </div>
         </div>
@@ -756,8 +770,8 @@ const char* htmlPage = R"rawliteral(
                 
                 // Update chart titles with date range - target the correct chart cards
                 const chartCards = document.querySelectorAll('.card');
-                const tempHumidCard = chartCards[3]; // 4th card (Temperature & Humidity History)
-                const pressureCard = chartCards[4]; // 5th card (Pressure History)
+                const tempHumidCard = chartCards[4]; // 5th card (Temperature & Humidity History)
+                const pressureCard = chartCards[5]; // 6th card (Pressure History)
                 
                 if (tempHumidCard && tempHumidCard.querySelector('h3')) {
                     tempHumidCard.querySelector('h3').textContent = `Temperature & Humidity History (${rangeText})`;
@@ -859,6 +873,9 @@ const char* htmlPage = R"rawliteral(
             updateCurrentReadings();
             updateMemoryInfo();
             
+            // Initialize camera preview
+            initializeCameraPreview();
+            
             // Connect to Server-Sent Events for real-time updates
             connectSSE();
             
@@ -869,6 +886,8 @@ const char* htmlPage = R"rawliteral(
             setInterval(loadHistoricalData, 120000);
             // Update memory info every minute
             setInterval(updateMemoryInfo, 60000);
+            // Update camera preview every 30 seconds
+            setInterval(refreshCameraPreview, 30000);
         });
         
         // Export data function
@@ -950,16 +969,8 @@ const char* htmlPage = R"rawliteral(
         }
         
         function detectCameraIP() {
-            // Try common ESP32-CAM IPs on the same network
-            const currentIP = window.location.hostname;
-            const baseIP = currentIP.substring(0, currentIP.lastIndexOf('.') + 1);
-            
-            // Common ESP32-CAM IPs to try: .130, .131, .132, .200, .201
-            const commonIPs = ['130', '131', '132', '200', '201'];
-            
-            // CHANGE THIS: Replace 'XXX' with your ESP32-CAM's last IP octet
-            // For example: if camera is at 192.168.0.145, use '145'
-            return baseIP + '107'; // ← UPDATE THIS WITH YOUR CAMERA IP
+            // Use the weather station proxy endpoints
+            return 'proxy';
         }
         
         function showCameraModal() {
@@ -983,36 +994,87 @@ const char* htmlPage = R"rawliteral(
             document.body.insertAdjacentHTML('beforeend', modal);
         }
         
-        function refreshCameraPreview() {
+        function initializeCameraPreview() {
+            console.log('Initializing camera preview from cache');
+            loadCameraPreview();
+        }
+        function loadCameraPreview() {
             const img = document.getElementById('camera-preview');
-            const currentSrc = img.src;
-            img.src = '';
-            setTimeout(() => {
-                img.src = currentSrc + '?' + Date.now();
-            }, 100);
+            const status = document.getElementById('camera-status');
+            
+            // Add timestamp to prevent browser caching
+            const timestamp = new Date().getTime();
+            const imageUrl = '/camera/capture?t=' + timestamp;
+            
+            img.onload = function() {
+                status.textContent = '� Cached';
+                status.className = 'camera-status camera-online';
+                console.log('Cached camera image loaded successfully');
+            };
+            
+            img.onerror = function() {
+                console.log('Failed to load cached camera image');
+                showCameraOffline();
+            };
+            
+            img.src = imageUrl;
         }
         
-        // Auto-refresh camera preview every 30 seconds
-        setInterval(refreshCameraPreview, 30000);
+        function refreshCameraPreview() {
+            console.log('Refreshing cached camera preview');
+            loadCameraPreview();
+        }
         
-        // Initialize camera preview on page load
-        window.addEventListener('load', function() {
-            // Update camera preview with detected IP
-            const cameraIP = detectCameraIP();
-            if (cameraIP && cameraIP !== 'ESP32CAM_IP') {
-                const img = document.getElementById('camera-preview');
-                img.src = 'http://' + cameraIP + '/capture';
-                img.onerror = function() {
-                    this.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMzIwIiBoZWlnaHQ9IjI0MCIgZmlsbD0iI2Y4ZjlmYSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMTEwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNhbWVyYSBPZmZsaW5lPC90ZXh0PgogIDx0ZXh0IHg9IjE2MCIgeT0iMTMwIiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiM2Yzc1N2QiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkNsaWNrIHRvIGNoZWNrIGNhbWVyYTwvdGV4dD4KICA8L3N2Zz4K';
-                    document.getElementById('camera-status').textContent = '📴 Offline';
-                    document.getElementById('camera-status').className = 'camera-status camera-offline';
-                };
-                img.onload = function() {
-                    document.getElementById('camera-status').textContent = '📹 Live';
-                    document.getElementById('camera-status').className = 'camera-status';
-                };
-            }
-        });
+        function testCameraManually() {
+            console.log('Manual camera test - refreshing cache');
+            
+            // Check cache status
+            fetch('/camera/status')
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Camera cache status:', data);
+                    // Refresh the camera preview
+                    loadCameraPreview();
+                })
+                .catch(error => {
+                    console.log('Camera test failed:', error);
+                    showCameraOffline();
+                });
+        }
+        
+        function showCameraOffline() {
+            const img = document.getElementById('camera-preview');
+            const status = document.getElementById('camera-status');
+            
+            // Create a helpful error image with network info
+            const canvas = document.createElement('canvas');
+            canvas.width = 320;
+            canvas.height = 240;
+            const ctx = canvas.getContext('2d');
+            
+            // Fill background
+            ctx.fillStyle = '#f8f9fa';
+            ctx.fillRect(0, 0, 320, 240);
+            
+            // Draw border
+            ctx.strokeStyle = '#dee2e6';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(1, 1, 318, 238);
+            
+            // Draw text
+            ctx.fillStyle = '#6c757d';
+            ctx.font = '16px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('📴 Camera Offline', 160, 80);
+            
+            ctx.font = '12px Arial';
+            ctx.fillText('No cached image available', 160, 110);
+            ctx.fillText('Click to refresh', 160, 130);
+            
+            img.src = canvas.toDataURL();
+            status.textContent = '📴 Offline';
+            status.className = 'camera-status camera-offline';
+        }
     </script>
 </body>
 </html>
@@ -1035,6 +1097,7 @@ String getOTAUpdatePage();
 unsigned long getCurrentTimestamp();
 String getMemoryInfo();
 void readSensorData();
+bool downloadAndCacheImage();
 void logSensorData();
 void handleRoot();
 void handleData();
@@ -1049,6 +1112,9 @@ bool loadConfig();
 bool saveConfig();
 void handleConfig();
 void handleConfigUpdate();
+void handleIndividualConfigUpdate();
+void handleConfigJSON();
+void handleConfigJSONUpdate();
 String getConfigPage();
 void initializeBuffers();
 void pauseDataCollection();
@@ -1184,9 +1250,84 @@ void setup() {
         if (!requireAuth()) return;
         server.send(200, "text/html", getConfigPage());
     });
+    // Camera proxy endpoints to solve HTTPS/HTTP mixed content issues
+    server.on("/camera/capture", HTTP_GET, []() {
+        logToSerial("[CAMERA] Serving cached image from LittleFS");
+        
+        if (LittleFS.exists("/capture.jpg")) {
+            File file = LittleFS.open("/capture.jpg", "r");
+            if (file) {
+                server.sendHeader("Access-Control-Allow-Origin", "*");
+                server.sendHeader("Content-Type", "image/jpeg");
+                server.sendHeader("Cache-Control", "no-cache");
+                server.streamFile(file, "image/jpeg");
+                file.close();
+                logToSerial("[CAMERA] Cached image served successfully");
+            } else {
+                server.send(500, "text/plain", "Cannot read cached image");
+            }
+        } else {
+            server.send(404, "text/plain", "No cached image available");
+        }
+    });
+    
+    server.on("/camera/status", HTTP_GET, []() {
+        logToSerial("[CAMERA] Checking cached image status");
+        
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.sendHeader("Content-Type", "application/json");
+        
+        if (LittleFS.exists("/capture.jpg")) {
+            File file = LittleFS.open("/capture.jpg", "r");
+            if (file) {
+                time_t lastModified = file.getLastWrite();
+                file.close();
+                
+                time_t now = millis() / 1000;
+                int ageSeconds = now - lastModified;
+                
+                String status = "{\"status\":\"cached\",\"age_seconds\":" + String(ageSeconds) + ",\"fresh\":" + (ageSeconds < 60 ? "true" : "false") + "}";
+                server.send(200, "application/json", status);
+            } else {
+                server.send(500, "application/json", "{\"status\":\"error\",\"message\":\"cannot_read_cache\"}");
+            }
+        } else {
+            server.send(404, "application/json", "{\"status\":\"no_cache\",\"message\":\"no_cached_image\"}");
+        }
+    });
+
+    server.on("/camera/info", []() {
+        // Return camera configuration info for debugging
+        String json = "{";
+        json += "\"configured_ip\":\"" + String(config.cameraIP) + "\",";
+        json += "\"proxy_endpoints\":[\"/camera/capture\", \"/camera/status\"],";
+        json += "\"local_ip\":\"" + WiFi.localIP().toString() + "\",";
+        json += "\"network\":\"" + WiFi.SSID() + "\"";
+        json += "}";
+        
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(200, "application/json", json);
+    });
+
     server.on("/configupdate", HTTP_POST, []() {
         if (!requireAuth()) return;
         handleConfigUpdate();
+    });
+    
+    // Individual setting update endpoint - safer for single setting changes
+    server.on("/config/update", HTTP_POST, []() {
+        if (!requireAuth()) return;
+        handleIndividualConfigUpdate();
+    });
+    
+    // Raw JSON configuration endpoints
+    server.on("/config/json", HTTP_GET, []() {
+        if (!requireAuth()) return;
+        handleConfigJSON();
+    });
+    server.on("/config/json", HTTP_POST, []() {
+        if (!requireAuth()) return;
+        handleConfigJSONUpdate();
     });
     server.on("/cleardata", []() {
         if (!requireAuth()) return;
@@ -1264,6 +1405,14 @@ void loop() {
     if (millis() - lastSSECleanup > 30000) {
         cleanupSSEClients();
         lastSSECleanup = millis();
+    }
+    
+    // Update camera image cache every 30 seconds
+    if (millis() - lastCameraUpdate >= cameraUpdateInterval) {
+        if (WiFi.status() == WL_CONNECTED && config.cameraIP[0] != '\0') {
+            downloadAndCacheImage();
+        }
+        lastCameraUpdate = millis();
     }
     
     // Periodic auto-save every 5 minutes (in case of unexpected restart)
@@ -1692,6 +1841,80 @@ String getMemoryInfo() {
     return info;
 }
 
+bool downloadAndCacheImage() {
+    if (config.cameraIP[0] == '\0') {
+        logToSerial("[CAMERA] No camera IP configured");
+        return false;
+    }
+    
+    HTTPClient http;
+    http.setTimeout(10000); // 10 second timeout for image download
+    String cameraUrl = "http://" + String(config.cameraIP) + ":80/capture";
+    
+    logToSerial("[CAMERA] Downloading image from: " + cameraUrl);
+    
+    if (!http.begin(cameraUrl)) {
+        logToSerial("[CAMERA] Failed to begin HTTP connection");
+        return false;
+    }
+    
+    int httpResponseCode = http.GET();
+    
+    if (httpResponseCode == 200) {
+        int contentLength = http.getSize();
+        logToSerial("[CAMERA] Image size: " + String(contentLength) + " bytes");
+        
+        // Check if we have enough space
+        size_t freeSpace = LittleFS.totalBytes() - LittleFS.usedBytes();
+        if (contentLength > 0 && contentLength > freeSpace) {
+            logToSerial("[CAMERA] Not enough storage space");
+            http.end();
+            return false;
+        }
+        
+        // Delete old image
+        if (LittleFS.exists("/capture.jpg")) {
+            LittleFS.remove("/capture.jpg");
+        }
+        
+        // Save new image
+        File file = LittleFS.open("/capture.jpg", "w");
+        if (file) {
+            WiFiClient* stream = http.getStreamPtr();
+            size_t bytesWritten = 0;
+            
+            // Read and write in chunks
+            uint8_t buffer[1024];
+            while (http.connected() && (contentLength <= 0 || bytesWritten < contentLength)) {
+                size_t availableBytes = stream->available();
+                if (availableBytes > 0) {
+                    size_t bytesToRead = min(availableBytes, sizeof(buffer));
+                    if (contentLength > 0) {
+                        bytesToRead = min(bytesToRead, contentLength - bytesWritten);
+                    }
+                    
+                    size_t bytesRead = stream->readBytes(buffer, bytesToRead);
+                    file.write(buffer, bytesRead);
+                    bytesWritten += bytesRead;
+                }
+                delay(1); // Yield to other tasks
+            }
+            
+            file.close();
+            logToSerial("[CAMERA] Image cached successfully: " + String(bytesWritten) + " bytes");
+            http.end();
+            return true;
+        } else {
+            logToSerial("[CAMERA] Failed to create cache file");
+        }
+    } else {
+        logToSerial("[CAMERA] HTTP error: " + String(httpResponseCode));
+    }
+    
+    http.end();
+    return false;
+}
+
 void readSensorData() {
     temperature = bme.readTemperature();
     pressure = bme.readPressure() / 100.0; // Convert Pa to hPa
@@ -1788,6 +2011,7 @@ void handleRoot() {
     html.replace("TEMP_VALUE", String(temperature, 1));
     html.replace("PRESSURE_VALUE", String(pressure, 1));
     html.replace("HUMIDITY_VALUE", String(humidity, 1));
+    html.replace("CAMERA_IP_PLACEHOLDER", String(config.cameraIP));
     server.send(200, "text/html", html);
 }
 
@@ -2536,6 +2760,9 @@ bool loadConfig() {
     if (doc["ntp"]["gmtOffset"]) config.gmtOffset_sec = doc["ntp"]["gmtOffset"];
     if (doc["ntp"]["dstOffset"]) config.daylightOffset_sec = doc["ntp"]["dstOffset"];
     
+    // Load camera settings
+    if (doc["camera"]["ip"]) strlcpy(config.cameraIP, doc["camera"]["ip"], sizeof(config.cameraIP));
+    
     // Load data collection settings
     if (doc["data"]["maxPoints"]) config.maxDataPoints = doc["data"]["maxPoints"];
     if (doc["data"]["logInterval"]) config.dataLogInterval = doc["data"]["logInterval"];
@@ -2567,6 +2794,9 @@ bool saveConfig() {
     doc["ntp"]["server"] = config.ntpServer;
     doc["ntp"]["gmtOffset"] = config.gmtOffset_sec;
     doc["ntp"]["dstOffset"] = config.daylightOffset_sec;
+    
+    // Camera settings
+    doc["camera"]["ip"] = config.cameraIP;
     
     // Data collection settings
     doc["data"]["maxPoints"] = config.maxDataPoints;
@@ -2711,6 +2941,8 @@ void handleConfigUpdate() {
         if (server.hasArg("gmtOffset")) config.gmtOffset_sec = server.arg("gmtOffset").toInt();
         if (server.hasArg("dstOffset")) config.daylightOffset_sec = server.arg("dstOffset").toInt();
         
+        if (server.hasArg("cameraIP")) strlcpy(config.cameraIP, server.arg("cameraIP").c_str(), sizeof(config.cameraIP));
+        
         if (server.hasArg("maxDataPoints")) config.maxDataPoints = server.arg("maxDataPoints").toInt();
         if (server.hasArg("dataLogInterval")) config.dataLogInterval = server.arg("dataLogInterval").toInt() * 1000; // Convert seconds to milliseconds
         if (server.hasArg("saveBatchSize")) config.saveBatchSize = server.arg("saveBatchSize").toInt();
@@ -2730,6 +2962,161 @@ void handleConfigUpdate() {
     } else {
         server.send(400, "text/plain", "Invalid action");
     }
+}
+
+// Individual configuration update - only updates specific settings without reinitializing buffers
+void handleIndividualConfigUpdate() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "text/plain", "Method Not Allowed");
+        return;
+    }
+    
+    String settingName = server.arg("setting");
+    String settingValue = server.arg("value");
+    
+    if (settingName.isEmpty()) {
+        server.send(400, "text/plain", "Missing 'setting' parameter");
+        return;
+    }
+    
+    logToSerial("Individual config update: " + settingName + " = " + settingValue);
+    
+    bool needsRestart = false;
+    bool bufferSizeChanged = false;
+    String responseMessage = "Setting updated successfully";
+    
+    // Update specific setting
+    if (settingName == "cameraIP") {
+        strlcpy(config.cameraIP, settingValue.c_str(), sizeof(config.cameraIP));
+        responseMessage = "Camera IP updated to: " + settingValue;
+    } else if (settingName == "ssid") {
+        strlcpy(config.ssid, settingValue.c_str(), sizeof(config.ssid));
+        needsRestart = true;
+        responseMessage = "Primary WiFi SSID updated (restart required)";
+    } else if (settingName == "password") {
+        strlcpy(config.password, settingValue.c_str(), sizeof(config.password));
+        needsRestart = true;
+        responseMessage = "Primary WiFi password updated (restart required)";
+    } else if (settingName == "ssid2") {
+        strlcpy(config.ssid2, settingValue.c_str(), sizeof(config.ssid2));
+        needsRestart = true;
+        responseMessage = "Secondary WiFi SSID updated (restart required)";
+    } else if (settingName == "password2") {
+        strlcpy(config.password2, settingValue.c_str(), sizeof(config.password2));
+        needsRestart = true;
+        responseMessage = "Secondary WiFi password updated (restart required)";
+    } else if (settingName == "adminUsername") {
+        strlcpy(config.adminUsername, settingValue.c_str(), sizeof(config.adminUsername));
+        responseMessage = "Admin username updated";
+    } else if (settingName == "adminPassword") {
+        strlcpy(config.adminPassword, settingValue.c_str(), sizeof(config.adminPassword));
+        responseMessage = "Admin password updated";
+    } else if (settingName == "ntpServer") {
+        strlcpy(config.ntpServer, settingValue.c_str(), sizeof(config.ntpServer));
+        responseMessage = "NTP server updated";
+    } else if (settingName == "gmtOffset") {
+        config.gmtOffset_sec = settingValue.toInt();
+        responseMessage = "GMT offset updated";
+    } else if (settingName == "dstOffset") {
+        config.daylightOffset_sec = settingValue.toInt();
+        responseMessage = "DST offset updated";
+    } else if (settingName == "dataLogInterval") {
+        config.dataLogInterval = settingValue.toInt() * 1000; // Convert to milliseconds
+        responseMessage = "Data logging interval updated";
+    } else if (settingName == "saveBatchSize") {
+        config.saveBatchSize = settingValue.toInt();
+        responseMessage = "Save batch size updated";
+    } else if (settingName == "dataCollectionEnabled") {
+        config.dataCollectionEnabled = (settingValue == "true" || settingValue == "1");
+        responseMessage = config.dataCollectionEnabled ? "Data collection enabled" : "Data collection disabled";
+    } else if (settingName == "maxDataPoints") {
+        config.maxDataPoints = settingValue.toInt();
+        bufferSizeChanged = true;
+        responseMessage = "⚠️ Max data points updated - this will reinitialize memory and may clear current data";
+    } else if (settingName == "maxSerialMessages") {
+        config.maxSerialMessages = settingValue.toInt();
+        bufferSizeChanged = true;
+        responseMessage = "⚠️ Max serial messages updated - this will reinitialize memory";
+    } else if (settingName == "maxSSEClients") {
+        config.maxSSEClients = settingValue.toInt();
+        bufferSizeChanged = true;
+        responseMessage = "⚠️ Max SSE clients updated - this will reinitialize memory";
+    } else {
+        server.send(400, "text/plain", "Unknown setting: " + settingName);
+        return;
+    }
+    
+    // Save configuration
+    if (saveConfig()) {
+        if (bufferSizeChanged) {
+            initializeBuffers();
+        }
+        
+        if (needsRestart) {
+            responseMessage += " - Device restart recommended for network changes to take effect";
+        }
+        
+        server.send(200, "text/plain", responseMessage);
+        logToSerial("Individual setting updated: " + settingName + " by user: " + String(config.adminUsername));
+    } else {
+        server.send(500, "text/plain", "Failed to save configuration");
+    }
+}
+
+// Return raw JSON configuration
+void handleConfigJSON() {
+    String json = "{";
+    json += "\"wifi\":{";
+    json += "\"ssid\":\"" + String(config.ssid) + "\",";
+    json += "\"password\":\"" + String(config.password) + "\",";
+    json += "\"ssid2\":\"" + String(config.ssid2) + "\",";
+    json += "\"password2\":\"" + String(config.password2) + "\"";
+    json += "},";
+    json += "\"admin\":{";
+    json += "\"username\":\"" + String(config.adminUsername) + "\",";
+    json += "\"password\":\"" + String(config.adminPassword) + "\"";
+    json += "},";
+    json += "\"ntp\":{";
+    json += "\"server\":\"" + String(config.ntpServer) + "\",";
+    json += "\"gmtOffset\":" + String(config.gmtOffset_sec) + ",";
+    json += "\"dstOffset\":" + String(config.daylightOffset_sec);
+    json += "},";
+    json += "\"camera\":{";
+    json += "\"ip\":\"" + String(config.cameraIP) + "\"";
+    json += "},";
+    json += "\"data\":{";
+    json += "\"maxDataPoints\":" + String(config.maxDataPoints) + ",";
+    json += "\"dataLogInterval\":" + String(config.dataLogInterval / 1000) + ",";
+    json += "\"saveBatchSize\":" + String(config.saveBatchSize) + ",";
+    json += "\"collectionEnabled\":" + String(config.dataCollectionEnabled ? "true" : "false");
+    json += "},";
+    json += "\"interface\":{";
+    json += "\"maxSerialMessages\":" + String(config.maxSerialMessages) + ",";
+    json += "\"maxSSEClients\":" + String(config.maxSSEClients);
+    json += "}";
+    json += "}";
+    
+    server.send(200, "application/json", json);
+}
+
+// Update configuration from raw JSON
+void handleConfigJSONUpdate() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "text/plain", "Method Not Allowed");
+        return;
+    }
+    
+    String jsonBody = server.arg("plain");
+    if (jsonBody.isEmpty()) {
+        server.send(400, "text/plain", "Missing JSON body");
+        return;
+    }
+    
+    logToSerial("JSON config update received: " + jsonBody);
+    
+    // Parse JSON (simplified parsing - you could use ArduinoJson for more robust parsing)
+    // For now, just parse individual key-value pairs
+    server.send(200, "text/plain", "JSON configuration update feature coming soon! Use individual setting updates for now.");
 }
 
 String getConfigPage() {
@@ -2881,9 +3268,38 @@ String getConfigPage() {
                 <button class="btn danger" onclick="toggleDataCollection('pause')">⏸️ Pause Collection</button>
             </div>
         </div>
+        
+        <div class="section">
+            <h3>🔧 Quick Settings (Individual Updates)</h3>
+            <div class="info">
+                <p><strong>Safe Updates:</strong> These update only the selected setting without affecting your collected data.</p>
+            </div>
+            <div class="row">
+                <div class="form-group">
+                    <label for="quickCameraIP">Camera IP Address:</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="quickCameraIP" value=")rawliteral" + String(config.cameraIP) + R"rawliteral(" placeholder="192.168.0.107">
+                        <button type="button" class="btn" onclick="updateSingleSetting('cameraIP', document.getElementById('quickCameraIP').value)">Update IP</button>
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="form-group" style="flex: 1;">
+                    <button type="button" class="btn secondary" onclick="showJSONEditor()">📝 Advanced: Edit Raw JSON Config</button>
+                </div>
+                <div class="form-group" style="flex: 1;">
+                    <button type="button" class="btn secondary" onclick="window.open('/config/json', '_blank')">📋 View Current JSON Config</button>
+                </div>
+            </div>
+        </div>
 
         <form id="configForm" method="POST" action="/configupdate">
             <input type="hidden" name="action" value="save">
+            
+            <div class="warning">
+                <strong>⚠️ Bulk Configuration Update:</strong> Saving this form will update ALL settings at once and may reinitialize memory buffers, 
+                potentially clearing collected data. Use "Quick Settings" above for safer individual updates.
+            </div>
             
             <div class="section">
                 <h3>📶 WiFi Configuration</h3>
@@ -2955,7 +3371,16 @@ String getConfigPage() {
             </div>
 
             <div class="section">
-                <h3>📊 Data Collection Settings</h3>
+                <h3>� Camera Configuration</h3>
+                <div class="form-group">
+                    <label for="cameraIP">ESP32-CAM IP Address:</label>
+                    <input type="text" id="cameraIP" name="cameraIP" value=")rawliteral" + String(config.cameraIP) + R"rawliteral(" pattern="^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$" required>
+                    <small>IP address of your ESP32-CAM module (e.g., 192.168.0.107)</small>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3>�📊 Data Collection Settings</h3>
                 <div class="row">
                     <div class="form-group">
                         <label for="maxDataPoints">Max Data Points:</label>
@@ -3028,6 +3453,98 @@ String getConfigPage() {
             formData.append('action', action);
             
             fetch('/configupdate', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+                location.reload();
+            })
+            .catch(error => {
+                alert('Error: ' + error);
+            });
+        }
+        
+        // Update individual setting safely
+        function updateSingleSetting(settingName, settingValue) {
+            if (!settingValue || settingValue.trim() === '') {
+                alert('Please enter a value for ' + settingName);
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('setting', settingName);
+            formData.append('value', settingValue.trim());
+            
+            fetch('/config/update', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(result => {
+                alert(result);
+                // Update the display value if successful
+                if (result.includes('updated successfully') || result.includes('Updated')) {
+                    document.getElementById('quick' + settingName.charAt(0).toUpperCase() + settingName.slice(1)).value = settingValue.trim();
+                }
+            })
+            .catch(error => {
+                alert('Error updating setting: ' + error);
+            });
+        }
+        
+        // Show JSON editor in a popup
+        function showJSONEditor() {
+            fetch('/config/json')
+                .then(response => response.json())
+                .then(config => {
+                    const jsonStr = JSON.stringify(config, null, 2);
+                    const editor = window.open('', 'jsonEditor', 'width=800,height=600,scrollbars=yes,resizable=yes');
+                    editor.document.write(`
+                        <html>
+                        <head>
+                            <title>Configuration JSON Editor</title>
+                            <style>
+                                body { font-family: monospace; margin: 20px; }
+                                textarea { width: 100%; height: 400px; font-family: monospace; }
+                                .btn { padding: 10px 20px; margin: 10px 5px; border: none; border-radius: 5px; cursor: pointer; }
+                                .btn.primary { background: #007bff; color: white; }
+                                .btn.secondary { background: #6c757d; color: white; }
+                                .warning { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 10px 0; }
+                            </style>
+                        </head>
+                        <body>
+                            <h2>Configuration JSON Editor</h2>
+                            <div class="warning">
+                                <strong>⚠️ Warning:</strong> Direct JSON editing is advanced. Invalid JSON will be rejected. 
+                                Use individual setting updates for safer changes.
+                            </div>
+                            <textarea id="configJson">${jsonStr}</textarea>
+                            <br>
+                            <button class="btn primary" onclick="saveJSON()">Save Configuration</button>
+                            <button class="btn secondary" onclick="window.close()">Cancel</button>
+                            <script>
+                                function saveJSON() {
+                                    const jsonText = document.getElementById('configJson').value;
+                                    try {
+                                        JSON.parse(jsonText); // Validate JSON
+                                        alert('JSON validation successful! (Note: Server-side update not yet implemented)');
+                                    } catch (e) {
+                                        alert('Invalid JSON: ' + e.message);
+                                    }
+                                }
+                            </script>
+                        </body>
+                        </html>
+                    `);
+                })
+                .catch(error => {
+                    alert('Error loading configuration: ' + error);
+                });
+        }
+        
+        // Original bulk update function
                 method: 'POST',
                 body: formData
             })
