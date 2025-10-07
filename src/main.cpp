@@ -3534,9 +3534,9 @@ String getConfigPage() {
                                         'alert("Invalid JSON: " + e.message);' +
                                     '}' +
                                 '}' +
-                            '</script>' +
-                        '</body>' +
-                        '</html>'
+                            '<\/script>' +
+                        '<\/body>' +
+                        '<\/html>'
                     );
                 })
                 .catch(error => {
