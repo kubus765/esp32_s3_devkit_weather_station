@@ -3501,63 +3501,49 @@ String getConfigPage() {
                 .then(config => {
                     const jsonStr = JSON.stringify(config, null, 2);
                     const editor = window.open('', 'jsonEditor', 'width=800,height=600,scrollbars=yes,resizable=yes');
-                    editor.document.write(`
-                        <html>
-                        <head>
-                            <title>Configuration JSON Editor</title>
-                            <style>
-                                body { font-family: monospace; margin: 20px; }
-                                textarea { width: 100%; height: 400px; font-family: monospace; }
-                                .btn { padding: 10px 20px; margin: 10px 5px; border: none; border-radius: 5px; cursor: pointer; }
-                                .btn.primary { background: #007bff; color: white; }
-                                .btn.secondary { background: #6c757d; color: white; }
-                                .warning { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 10px 0; }
-                            </style>
-                        </head>
-                        <body>
-                            <h2>Configuration JSON Editor</h2>
-                            <div class="warning">
-                                <strong>⚠️ Warning:</strong> Direct JSON editing is advanced. Invalid JSON will be rejected. 
-                                Use individual setting updates for safer changes.
-                            </div>
-                            <textarea id="configJson">${jsonStr}</textarea>
-                            <br>
-                            <button class="btn primary" onclick="saveJSON()">Save Configuration</button>
-                            <button class="btn secondary" onclick="window.close()">Cancel</button>
-                            <script>
-                                function saveJSON() {
-                                    const jsonText = document.getElementById('configJson').value;
-                                    try {
-                                        JSON.parse(jsonText); // Validate JSON
-                                        alert('JSON validation successful! (Note: Server-side update not yet implemented)');
-                                    } catch (e) {
-                                        alert('Invalid JSON: ' + e.message);
-                                    }
-                                }
-                            </script>
-                        </body>
-                        </html>
-                    `);
+                    editor.document.write(
+                        '<html>' +
+                        '<head>' +
+                            '<title>Configuration JSON Editor</title>' +
+                            '<style>' +
+                                'body { font-family: monospace; margin: 20px; }' +
+                                'textarea { width: 100%; height: 400px; font-family: monospace; }' +
+                                '.btn { padding: 10px 20px; margin: 10px 5px; border: none; border-radius: 5px; cursor: pointer; }' +
+                                '.btn.primary { background: #007bff; color: white; }' +
+                                '.btn.secondary { background: #6c757d; color: white; }' +
+                                '.warning { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 10px 0; }' +
+                            '</style>' +
+                        '</head>' +
+                        '<body>' +
+                            '<h2>Configuration JSON Editor</h2>' +
+                            '<div class="warning">' +
+                                '<strong>⚠️ Warning:</strong> Direct JSON editing is advanced. Invalid JSON will be rejected. ' +
+                                'Use individual setting updates for safer changes.' +
+                            '</div>' +
+                            '<textarea id="configJson">' + jsonStr + '</textarea>' +
+                            '<br>' +
+                            '<button class="btn primary" onclick="saveJSON()">Save Configuration</button>' +
+                            '<button class="btn secondary" onclick="window.close()">Cancel</button>' +
+                            '<script>' +
+                                'function saveJSON() {' +
+                                    'const jsonText = document.getElementById("configJson").value;' +
+                                    'try {' +
+                                        'JSON.parse(jsonText);' +
+                                        'alert("JSON validation successful! (Note: Server-side update not yet implemented)");' +
+                                    '} catch (e) {' +
+                                        'alert("Invalid JSON: " + e.message);' +
+                                    '}' +
+                                '}' +
+                            '</script>' +
+                        '</body>' +
+                        '</html>'
+                    );
                 })
                 .catch(error => {
                     alert('Error loading configuration: ' + error);
                 });
         }
         
-        // Original bulk update function
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.text())
-            .then(result => {
-                alert(result);
-                window.location.reload();
-            })
-            .catch(error => {
-                alert('Error: ' + error);
-            });
-        }
-
         // Password strength checker
         function checkPasswordStrength() {
             const password = document.getElementById('adminPassword').value;
