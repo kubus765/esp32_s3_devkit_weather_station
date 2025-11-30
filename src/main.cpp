@@ -46,14 +46,14 @@ struct WeatherConfig {
 // Global configuration with default values
 WeatherConfig config = {
     // WiFi defaults - primary wifi ssid&password, secondary wifi ssid&password
-    "UPC6628674",
-    "Ar6jxnrurxhe", 
-    "5GTowerTest",
-    "stopcham",
+    "xxxxxxxxxxxxx",
+    "xxxxxxxxxxxx", 
+    "xxxxxxxxxx",
+    "xxxxxxxxxxx",
     
     // Admin defaults
     "admin",
-    "weather2025!",
+    "xxxxxxxxxxxxxxx",
     
     // NTP defaults
     "pool.ntp.org",
